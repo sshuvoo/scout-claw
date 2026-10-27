@@ -1,0 +1,46 @@
+# Binaries and compiled outputs
+/scout
+/scoutclaw
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+dist/
+
+# Test binary, coverage, and profiling outputs
+*.test
+*.out
+*.prof
+cpu.pprof
+mem.pprof
+coverage.txt
+coverage.html
+
+# Environment and sensitive credential files
+.env
+.env.*
+!.env.example
+*.env
+*.pem
+*.key
+
+# IDE and Editor configurations
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Go workspace and vendor
+/vendor/
+go.work
+go.work.sum
+
+# Temporary logs and crash dumps
+*.log
+scratch/
+tmp/
