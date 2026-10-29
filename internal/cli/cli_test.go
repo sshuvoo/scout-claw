@@ -197,3 +197,32 @@ func TestFlagsOverrideEnvironment(t *testing.T) {
 		t.Fatal(h.out.String())
 	}
 }
+
+func TestSlashCommandsInChat(t *testing.T) {
+	h := newHarness(t, "/help\n/approval readonly\n/approval bogus\n/model gpt-test\n/model\n/config\n/status\n/nope\n/key\n/exit\n")
+	if code := h.run("chat"); code != 0 {
+		t.Fatal(h.errb.String())
+	}
+	out := h.out.String()
+	for _, want := range []string{"/approval [mode]", "approval is now readonly", "unknown mode", "model is now gpt-test", "model: gpt-test",
+		"SCOUTCLAW_MODEL", "unknown command /nope", "/key needs an interactive terminal", "Bye from ScoutClaw"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "not-real-0000") {
+		t.Fatal("key leaked")
+	}
+}
+
+func TestApprovalSwitchAppliesToPolicy(t *testing.T) {
+	h := newHarness(t, "/approval readonly\nwrite a file\n/exit\n",
+		llm.Calls(llm.ToolCall{ID: "1", Name: "fs_write", Arguments: `{"path":"n.txt","content":"x"}`}),
+		func(req llm.Request) (*llm.Response, error) {
+			if !strings.Contains(req.ToolOutputs[0].Output, "approval policy is readonly") {
+				t.Errorf("policy mode not applied: %q", req.ToolOutputs[0].Output)
+			}
+			return &llm.Response{Text: "denied"}, nil
+		})
+	h.run("chat")
+}

@@ -238,3 +238,52 @@ func parseEnvFile(path string) {
 		}
 	}
 }
+
+// UserEnvPath is the per-user env file that `scout` reads from any directory.
+func UserEnvPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".scoutclaw.env"), nil
+}
+
+// SetEnvFile sets KEY=value in an env file (replacing an existing KEY line,
+// keeping everything else), creating it with mode 0600 if needed.
+func SetEnvFile(path, key, value string) error {
+	if key == "" || strings.ContainsAny(key, "= \t\n") || strings.ContainsAny(value, "\r\n") {
+		return fmt.Errorf("invalid key or value")
+	}
+	var lines []string
+	if b, err := os.ReadFile(path); err == nil {
+		lines = strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	set := false
+	for i, l := range lines {
+		t := strings.TrimPrefix(strings.TrimSpace(l), "export ")
+		if k, _, ok := strings.Cut(t, "="); ok && strings.TrimSpace(k) == key {
+			lines[i], set = key+"="+value, true
+		}
+	}
+	if !set {
+		lines = append(lines, key+"="+value)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".scoutclaw-env-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.WriteString(strings.Join(lines, "\n") + "\n"); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
+}

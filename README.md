@@ -23,7 +23,7 @@ The model only *proposes*. The runtime validates, authorizes, executes and verif
 ```bash
 git clone https://github.com/sshuvoo/scout-claw.git && cd scout-claw
 make install                                   # installs the global `scout` command (~/.local/bin)
-echo 'OPENAI_API_KEY=your_key_here' > ~/.scoutclaw.env && chmod 600 ~/.scoutclaw.env
+scout setup                                    # paste your OpenAI API key once (hidden input)
 scout doctor --online                          # verify key, model and connectivity
 scout run --approval readonly "How much disk space and memory is free?"
 ```
@@ -38,7 +38,7 @@ You need an OpenAI API key (`OPENAI_API_KEY`, Responses API, default model `gpt-
 | Go only | Go 1.27.1+ | `go install ./cmd/scout` (installs `~/go/bin/scout`) |
 | Release script | curl, a published release | `curl -fsSL https://raw.githubusercontent.com/sshuvoo/scout-claw/main/install.sh \| sh` |
 
-Make sure the install directory is on your `PATH`, then check with `scout version`. For a global command, keep the API key in `~/.scoutclaw.env` (or export it): a project-local `./.env` only applies when you run `scout` from that directory.
+Make sure the install directory is on your `PATH`, then check with `scout version`. Run `scout setup` to store your API key (saved to `~/.scoutclaw.env`, mode 600, works from any directory). A project-local `./.env` only applies when you run `scout` from that directory.
 
 Full guide, including PATH setup, upgrading from the first version, updating, uninstalling and troubleshooting: **[docs/installation.md](docs/installation.md)**.
 
@@ -75,7 +75,8 @@ scout run --resume last "Now also check the logs"            # continue a sessio
 | Command | What it does |
 |---|---|
 | `run <task>` | Run one task and exit. Exit code is non-zero if the task was cancelled, hit a limit, failed or ended unresolved. |
-| `chat` | Interactive session; follow-ups keep the conversation. In-chat: `help`, `clear`, `reset` (new session), `exit`. |
+| `chat` | Interactive session; follow-ups keep the conversation. Slash commands inside chat: `/help`, `/config`, `/status`, `/model [name]`, `/approval [ask\|auto\|readonly]`, `/key` (set API key), `/history`, `/clear`, `/reset`, `/exit`. `/model` and `/approval` last for the session. |
+| `setup` | Enter your API key once (hidden input); saved for all future runs. |
 | `doctor [--online]` | Checks config, state dir, optional tools, DNS/TCP to the API host; `--online` sends one tiny request to prove key and model work. |
 | `status` | Version, platform, limits, session counts, last session, audit log — no secrets. |
 | `config` | Effective configuration with the variable each value comes from. |

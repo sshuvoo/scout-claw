@@ -74,14 +74,22 @@ source ~/.bashrc
 
 ## 3. Set your API key
 
-A global command runs from many directories, so do not rely on a project-local `.env`. Store the key in a per-user file ScoutClaw already reads:
+The easiest way is to let ScoutClaw do it:
+
+```bash
+scout setup
+```
+
+It asks for your key (input hidden) and saves it to `~/.scoutclaw.env` with permissions 600, so it works from every directory. You can also just run `scout`: if no key is found it asks for one on first start. Inside a chat session, `/key` replaces the key at any time.
+
+Manual alternative (the same file):
 
 ```bash
 echo 'OPENAI_API_KEY=your_openai_api_key_here' > ~/.scoutclaw.env
 chmod 600 ~/.scoutclaw.env
 ```
 
-Alternatives: `export OPENAI_API_KEY=...` in your shell profile, or `~/.scout.env`, `~/.env`, or `./.env`. Real environment variables win over files. The key is never printed or logged. All other settings are optional; see `.env.example` and the configuration table in the README.
+Other options: `export OPENAI_API_KEY=...` in your shell profile, or `~/.scout.env`, `~/.env`, `./.env`. Real environment variables win over files. The key is never printed or logged. Other settings are optional; see `.env.example`.
 
 ## 4. Verify the installation
 
@@ -127,7 +135,7 @@ rm -f ~/.scoutclaw.env
 |---|---|
 | `scout: command not found` | The install directory is not on `PATH` (step 2). |
 | `scout` shows an old banner or ignores `run`/`doctor` | An old build is first on `PATH`; see the upgrade note at the top and `command -v scout`. |
-| `OPENAI_API_KEY is not set` | Create `~/.scoutclaw.env` (step 3) or export the variable. |
+| `OPENAI_API_KEY is not set` | Run `scout setup` (step 3). |
 | `authentication failed (HTTP 401)` | The key is wrong or lacks access to the model; check with `scout doctor --online`. |
 | HTTP 400 / model not found | Choose another model: `SCOUTCLAW_MODEL=...` or `--model`. |
 | Config errors such as `invalid approval policy` | Run `scout config` to see effective values; valid approval modes are `ask`, `auto`, `readonly`. |

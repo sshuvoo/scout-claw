@@ -101,6 +101,16 @@ func newRuntime(cfg *config.Config, ui *UI, sess *session.Session) (*Runtime, er
 	return &Runtime{Cfg: cfg, UI: ui, Agent: ag, Session: sess, audit: lg}, nil
 }
 
+// syncSession copies the agent's conversation pointer into the session so a
+// rebuilt runtime continues the same conversation.
+func (r *Runtime) syncSession() {
+	r.Session.ResponseID = r.Agent.PreviousID
+	r.Session.Pending = nil
+	for _, c := range r.Agent.Carry {
+		r.Session.Pending = append(r.Session.Pending, session.Pending{CallID: c.CallID, Output: c.Output})
+	}
+}
+
 func (r *Runtime) Close() { _ = r.audit.Close() }
 
 // RunTask runs one task. Ctrl-C (SIGINT/SIGTERM) cancels it and terminates any

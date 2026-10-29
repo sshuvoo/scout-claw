@@ -105,7 +105,23 @@ fix (with your approval for anything risky) and verifies the result.
 	}
 	chat.Flags().StringVar(&a.fl.resume, "resume", "", "continue a session: an id or 'last'")
 
-	root.AddCommand(run, chat, a.doctorCmd(), a.statusCmd(), a.configCmd(), a.historyCmd(), a.versionCmd())
+	setup := &cobra.Command{
+		Use:   "setup",
+		Short: "Enter your OpenAI API key once (hidden input, saved for all future runs)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := a.loadConfig(cmd)
+			if err != nil {
+				return err
+			}
+			if err := a.promptForKey(cmd.Context(), cfg, a.newUI()); err != nil {
+				return err
+			}
+			fmt.Fprintf(a.Out, "Saved (%s). Verify with: scout doctor --online\n", cfg.MaskedKey())
+			return nil
+		},
+	}
+	root.AddCommand(setup, run, chat, a.doctorCmd(), a.statusCmd(), a.configCmd(), a.historyCmd(), a.versionCmd())
 	return root
 }
 

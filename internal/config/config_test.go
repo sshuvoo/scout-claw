@@ -73,3 +73,25 @@ func TestDotEnvDoesNotOverride(t *testing.T) {
 		t.Fatalf("A=%q B=%q", os.Getenv("FOO_A"), os.Getenv("FOO_B"))
 	}
 }
+
+func TestSetEnvFileReplacesAndKeepsOthers(t *testing.T) {
+	p := filepath.Join(t.TempDir(), ".scoutclaw.env")
+	os.WriteFile(p, []byte("# note\nSCOUTCLAW_MODEL=x\nexport OPENAI_API_KEY=old\n"), 0o644)
+	if err := SetEnvFile(p, "OPENAI_API_KEY", "new-key"); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetEnvFile(p, "SCOUTCLAW_APPROVAL", "auto"); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(p)
+	want := "# note\nSCOUTCLAW_MODEL=x\nOPENAI_API_KEY=new-key\nSCOUTCLAW_APPROVAL=auto\n"
+	if string(b) != want {
+		t.Fatalf("got %q", b)
+	}
+	if st, _ := os.Stat(p); st.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %v", st.Mode())
+	}
+	if SetEnvFile(p, "BAD KEY", "v") == nil || SetEnvFile(p, "K", "a\nb") == nil {
+		t.Fatal("invalid input accepted")
+	}
+}

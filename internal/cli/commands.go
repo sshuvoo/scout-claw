@@ -48,17 +48,7 @@ Secrets are never printed.`,
 			if err != nil {
 				return err
 			}
-			row := func(k, v, env string) { fmt.Fprintf(a.Out, "%-14s %-44s %s\n", k, v, env) }
-			row("api key", cfg.MaskedKey(), config.EnvAPIKey)
-			row("base url", orStr(cfg.BaseURL, "(provider default)"), config.EnvBaseURL)
-			row("model", cfg.Model, config.EnvModel)
-			row("workspace", cfg.Workspace, config.EnvWorkspace)
-			row("state dir", cfg.StateDir, config.EnvStateDir)
-			row("approval", string(cfg.Approval), config.EnvApproval)
-			row("max steps", fmt.Sprint(cfg.MaxSteps), config.EnvMaxSteps)
-			row("tool timeout", cfg.ToolTimeout.String(), config.EnvToolTimeout)
-			row("task timeout", cfg.TaskTimeout.String(), config.EnvTaskTimeout)
-			row("max output", fmt.Sprintf("%d bytes", cfg.MaxOutput), config.EnvMaxOutput)
+			a.printConfig(cfg)
 			return nil
 		},
 	}
@@ -319,4 +309,18 @@ func apiHost(base string) (host, port string) {
 		}
 	}
 	return u.Hostname(), port
+}
+
+func (a *App) printConfig(cfg *config.Config) {
+	row := func(k, v, env string) { fmt.Fprintf(a.Out, "%-14s %-44s %s\n", k, v, env) }
+	row("api key", cfg.MaskedKey(), config.EnvAPIKey)
+	row("base url", orStr(cfg.BaseURL, "(provider default)"), config.EnvBaseURL)
+	row("model", cfg.Model, config.EnvModel)
+	row("workspace", cfg.Workspace, config.EnvWorkspace)
+	row("state dir", cfg.StateDir, config.EnvStateDir)
+	row("approval", string(cfg.Approval), config.EnvApproval)
+	row("max steps", fmt.Sprint(cfg.MaxSteps), config.EnvMaxSteps)
+	row("tool timeout", cfg.ToolTimeout.String(), config.EnvToolTimeout)
+	row("task timeout", cfg.TaskTimeout.String(), config.EnvTaskTimeout)
+	row("max output", fmt.Sprintf("%d bytes", cfg.MaxOutput), config.EnvMaxOutput)
 }
