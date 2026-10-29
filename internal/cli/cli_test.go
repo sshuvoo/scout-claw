@@ -1,9 +1,16 @@
 package cli
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +18,7 @@ import (
 
 	"scoutclaw/internal/config"
 	"scoutclaw/internal/llm"
+	"scoutclaw/internal/update"
 )
 
 type harness struct {
@@ -21,6 +29,7 @@ type harness struct {
 
 func newHarness(t *testing.T, stdin string, steps ...func(llm.Request) (*llm.Response, error)) *harness {
 	ws := t.TempDir()
+	t.Setenv("HOME", t.TempDir()) // never read the developer's real ~/.scoutclaw.env
 	t.Setenv(config.EnvStateDir, t.TempDir())
 	t.Setenv(config.EnvWorkspace, ws)
 	t.Setenv(config.EnvAPIKey, "sk-test-key-not-real-0000000000")
@@ -259,5 +268,52 @@ func TestSetupAcceptsPipedKey(t *testing.T) {
 	}
 	if strings.Contains(h.out.String(), "piped-key") {
 		t.Fatalf("key echoed: %s", h.out.String())
+	}
+}
+
+func fakeUpdater(t *testing.T, tag string) (*update.Updater, string) {
+	arc := &bytes.Buffer{}
+	gz := gzip.NewWriter(arc)
+	tw := tar.NewWriter(gz)
+	bin := bytes.Repeat([]byte("N"), 4096)
+	tw.WriteHeader(&tar.Header{Name: "scout", Mode: 0o755, Size: int64(len(bin)), Typeflag: tar.TypeReg})
+	tw.Write(bin)
+	tw.Close()
+	gz.Close()
+	u := update.New("o/r")
+	sum := sha256.Sum256(arc.Bytes())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/releases/latest"):
+			fmt.Fprintf(w, `{"tag_name":%q}`, tag)
+		case strings.HasSuffix(r.URL.Path, ".tar.gz"):
+			w.Write(arc.Bytes())
+		case strings.HasSuffix(r.URL.Path, "checksums.txt"):
+			fmt.Fprintf(w, "%s  %s\n", hex.EncodeToString(sum[:]), u.ArchiveName(tag))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	u.APIBase, u.DownloadBase = srv.URL, srv.URL
+	u.GOOS, u.GOARCH = "linux", "amd64"
+	return u, srv.URL
+}
+
+func TestUpdateCheckAndUpToDate(t *testing.T) {
+	h := newHarness(t, "")
+	u, _ := fakeUpdater(t, "v9.0.0")
+	old := newUpdater
+	newUpdater = func() *update.Updater { return u }
+	t.Cleanup(func() { newUpdater = old })
+
+	if code := h.run("update", "--check"); code != 0 || !strings.Contains(h.out.String(), "v9.0.0") || !strings.Contains(h.out.String(), "newer release") {
+		t.Fatalf("%s %s", h.out.String(), h.errb.String())
+	}
+	oldV := Version
+	Version = "v9.0.0"
+	t.Cleanup(func() { Version = oldV })
+	h.out.Reset()
+	h.run("update")
+	if !strings.Contains(h.out.String(), "up to date") {
+		t.Fatalf("%s", h.out.String())
 	}
 }

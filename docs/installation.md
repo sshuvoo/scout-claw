@@ -113,8 +113,13 @@ By default ScoutClaw asks before anything beyond read-only inspection and can on
 
 ## Updating
 
-- Source install: `git pull`, then `make install` (or `go install ./cmd/scout`).
-- Release install: re-run the install script (optionally with `SCOUT_VERSION`).
+```bash
+scout update            # install the latest release in place (checksum-verified)
+scout update --check    # only report whether a newer release exists
+scout update --version v0.1.2   # a specific release
+```
+
+`scout update` needs write access to the directory containing `scout` (true for `~/.local/bin`; for a system-wide install run it with sufficient permissions). Source installs can also `git pull` and `make install`.
 
 ## Uninstalling
 

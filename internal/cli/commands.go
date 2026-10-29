@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"scoutclaw/internal/platform"
 	"scoutclaw/internal/redact"
 	"scoutclaw/internal/session"
+	"scoutclaw/internal/update"
 )
 
 func (a *App) versionCmd() *cobra.Command {
@@ -48,7 +50,7 @@ Secrets are never printed.`,
 			if err != nil {
 				return err
 			}
-			a.printConfig(cfg)
+			a.printConfig(cfg, a.Out)
 			return nil
 		},
 	}
@@ -311,8 +313,8 @@ func apiHost(base string) (host, port string) {
 	return u.Hostname(), port
 }
 
-func (a *App) printConfig(cfg *config.Config) {
-	row := func(k, v, env string) { fmt.Fprintf(a.Out, "%-14s %-44s %s\n", k, v, env) }
+func (a *App) printConfig(cfg *config.Config, out io.Writer) {
+	row := func(k, v, env string) { fmt.Fprintf(out, "%-14s %-44s %s\n", k, v, env) }
 	row("api key", cfg.MaskedKey(), config.EnvAPIKey)
 	row("base url", orStr(cfg.BaseURL, "(provider default)"), config.EnvBaseURL)
 	row("model", cfg.Model, config.EnvModel)
@@ -323,4 +325,69 @@ func (a *App) printConfig(cfg *config.Config) {
 	row("tool timeout", cfg.ToolTimeout.String(), config.EnvToolTimeout)
 	row("task timeout", cfg.TaskTimeout.String(), config.EnvTaskTimeout)
 	row("max output", fmt.Sprintf("%d bytes", cfg.MaxOutput), config.EnvMaxOutput)
+}
+
+const repo = "sshuvoo/scout-claw"
+
+// newUpdater is replaced in tests.
+var newUpdater = func() *update.Updater { return update.New(repo) }
+
+func (a *App) updateCmd() *cobra.Command {
+	var check bool
+	var version string
+	cmd := &cobra.Command{
+		Use:   "update",
+		Short: "Update scout to the latest release",
+		Long: `Downloads the latest GitHub release for this OS and architecture, verifies its SHA-256
+checksum, and replaces the running scout executable in place.
+
+  scout update               install the latest release
+  scout update --check       only report whether a newer release exists
+  scout update --version v0.1.2   install a specific release (also works for downgrades)`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			u := newUpdater()
+			ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Minute)
+			defer cancel()
+
+			tag := version
+			if tag == "" {
+				var err error
+				if tag, err = u.Latest(ctx); err != nil {
+					return err
+				}
+			} else if !strings.HasPrefix(tag, "v") {
+				tag = "v" + tag
+			}
+			fmt.Fprintf(a.Out, "installed: %s\navailable: %s\n", Version, tag)
+			if version == "" && !update.Newer(Version, tag) {
+				fmt.Fprintln(a.Out, "scout is up to date.")
+				return nil
+			}
+			if check {
+				fmt.Fprintf(a.Out, "A newer release is available. Run: scout update\n")
+				return nil
+			}
+			exe, err := os.Executable()
+			if err != nil {
+				return err
+			}
+			if real, err := filepath.EvalSymlinks(exe); err == nil {
+				exe = real
+			}
+			fmt.Fprintf(a.Out, "downloading %s …\n", u.ArchiveName(tag))
+			bin, err := u.Fetch(ctx, tag)
+			if err != nil {
+				return err
+			}
+			if err := update.Replace(exe, bin); err != nil {
+				return err
+			}
+			fmt.Fprintf(a.Out, "updated %s → %s (%s)\nrelease notes: https://github.com/%s/releases/tag/%s\n", Version, tag, exe, repo, tag)
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&check, "check", false, "only check whether an update is available")
+	cmd.Flags().StringVar(&version, "version", "", "install this specific release tag")
+	return cmd
 }

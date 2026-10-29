@@ -40,6 +40,10 @@ type UI struct {
 	Interactive bool // can the user answer approval prompts?
 	Redactor    *redact.Redactor
 	Verbose     bool
+
+	// Optional hooks used by the full-screen chat UI.
+	approveFn func(context.Context, executor.ApprovalRequest) (executor.ApprovalResponse, error)
+	onStatus  func(string) // current activity, "" when idle
 }
 
 func (u *UI) c(code, s string) string {
@@ -65,10 +69,16 @@ func (u *UI) Plan(steps []task.Step, hypothesis string) {
 }
 
 func (u *UI) ToolStart(summary string) {
+	if u.onStatus != nil {
+		u.onStatus(u.Redactor.Redact(summary))
+	}
 	fmt.Fprintln(u.Out, u.c(cBold, "$ "+u.Redactor.Redact(summary)))
 }
 
 func (u *UI) ToolEnd(o executor.Outcome) {
+	if u.onStatus != nil {
+		u.onStatus("")
+	}
 	if o.Call.Name == "update_plan" || o.Call.Name == "finish" && o.OK() {
 		return
 	}
@@ -107,8 +117,8 @@ func (u *UI) ToolEnd(o executor.Outcome) {
 
 func (u *UI) Notice(msg string) { fmt.Fprintln(u.Err, u.c(cYellow, "! "+msg)) }
 
-// Approve implements executor.Approver.
-func (u *UI) Approve(ctx context.Context, req executor.ApprovalRequest) (executor.ApprovalResponse, error) {
+// describeApproval prints what is about to happen so the user can decide.
+func (u *UI) describeApproval(req executor.ApprovalRequest) {
 	d := req.Decision
 	colour := cYellow
 	if d.Risk == policy.High {
@@ -127,10 +137,19 @@ func (u *UI) Approve(ctx context.Context, req executor.ApprovalRequest) (executo
 		fmt.Fprintln(u.Out, "   change  :")
 		fmt.Fprintln(u.Out, indent(clipLines(u.Redactor.Redact(req.Preview), 60), "     "))
 	}
+}
+
+// Approve implements executor.Approver.
+func (u *UI) Approve(ctx context.Context, req executor.ApprovalRequest) (executor.ApprovalResponse, error) {
+	u.describeApproval(req)
+	if u.approveFn != nil {
+		return u.approveFn(ctx, req)
+	}
 	if !u.Interactive {
 		fmt.Fprintln(u.Out, u.c(cYellow, "   not approved: no interactive terminal. Use --approval auto to pre-approve medium-risk actions (high risk always needs a person)."))
 		return executor.ApprovalResponse{}, nil
 	}
+	d := req.Decision
 	opts := "[y]es / [n]o"
 	if d.Risk == policy.Medium && d.Key != "" {
 		opts += " / [a]lways for this session"

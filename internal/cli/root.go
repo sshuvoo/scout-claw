@@ -25,6 +25,7 @@ type flags struct {
 	resume    string
 	verbose   bool
 	noColor   bool
+	plain     bool
 }
 
 type App struct {
@@ -85,6 +86,7 @@ fix (with your approval for anything risky) and verifies the result.
 	pf.IntVar(&a.fl.maxSteps, "max-steps", 0, "maximum agent iterations per task (default 25; env "+config.EnvMaxSteps+")")
 	pf.BoolVarP(&a.fl.verbose, "verbose", "v", false, "show more tool output")
 	pf.BoolVar(&a.fl.noColor, "no-color", false, "disable colored output")
+	pf.BoolVar(&a.fl.plain, "plain", false, "use the simple line-based chat instead of the full-screen UI")
 	root.Flags().StringVar(&a.fl.resume, "resume", "", "resume a session: an id or 'last'")
 
 	run := &cobra.Command{
@@ -121,7 +123,7 @@ fix (with your approval for anything risky) and verifies the result.
 			return nil
 		},
 	}
-	root.AddCommand(setup, run, chat, a.doctorCmd(), a.statusCmd(), a.configCmd(), a.historyCmd(), a.versionCmd())
+	root.AddCommand(setup, a.updateCmd(), run, chat, a.doctorCmd(), a.statusCmd(), a.configCmd(), a.historyCmd(), a.versionCmd())
 	return root
 }
 

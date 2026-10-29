@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -32,13 +33,28 @@ var tips = []string{
 	"/reset starts a fresh conversation; /exit quits.",
 }
 
+// slashCommands drives /help and the autocomplete list.
+var slashCommands = []struct{ name, desc string }{
+	{"/help", "show commands and keys"},
+	{"/model", "show or switch the model"},
+	{"/approval", "show or switch approvals (ask|auto|readonly)"},
+	{"/key", "enter or replace your API key"},
+	{"/config", "show effective configuration"},
+	{"/status", "session, limits and workspace"},
+	{"/history", "recent sessions"},
+	{"/doctor", "quick local checks"},
+	{"/clear", "clear the screen"},
+	{"/reset", "start a new session"},
+	{"/exit", "quit"},
+}
+
 const helpText = `Type a task in plain language, or a slash command:
   /help                 show this help
   /config               show effective configuration (key masked)
   /status               session, limits and workspace
   /model [name]         show or switch the model (this session only)
   /approval [mode]      show or switch approvals: ask | auto | readonly (this session only)
-  /key                  enter or replace your OpenAI API key (hidden input, saved to ~/.scoutclaw.env)
+  /key                  enter or replace your OpenAI API key (masked input)
   /history              recent sessions
   /doctor               quick local checks
   /clear                clear the screen
@@ -54,6 +70,9 @@ func (a *App) chat(cmd *cobra.Command) error {
 	sess, err := a.resumeSession(cfg)
 	if err != nil {
 		return err
+	}
+	if a.useTUI() {
+		return a.runTUI(cmd, cfg, sess)
 	}
 	ui := a.newUI()
 	if cfg.APIKey == "" && a.stdinT {
@@ -95,7 +114,7 @@ func (a *App) chat(cmd *cobra.Command) error {
 			prompt, lower = "/"+lower, "/"+lower // legacy bare words
 		}
 		if strings.HasPrefix(prompt, "/") {
-			quit, newRT := a.slash(cmd.Context(), cfg, ui, rt, prompt)
+			quit, newRT := a.slash(cmd.Context(), cfg, ui, rt, prompt, a.Out)
 			if quit {
 				fmt.Fprintln(a.Out, ui.c(cCyan, "Bye from ScoutClaw."))
 				return nil
@@ -118,10 +137,10 @@ func (a *App) chat(cmd *cobra.Command) error {
 
 // slash handles one slash command. It returns quit=true to leave the chat and a
 // replacement runtime when the command had to rebuild it.
-func (a *App) slash(ctx context.Context, cfg *config.Config, ui *UI, rt *Runtime, line string) (quit bool, newRT *Runtime) {
+func (a *App) slash(ctx context.Context, cfg *config.Config, ui *UI, rt *Runtime, line string, out io.Writer) (quit bool, newRT *Runtime) {
 	fields := strings.Fields(line)
 	name, args := strings.ToLower(fields[0]), fields[1:]
-	say := func(f string, v ...any) { fmt.Fprintf(a.Out, f+"\n", v...) }
+	say := func(f string, v ...any) { fmt.Fprintf(out, f+"\n", v...) }
 
 	switch name {
 	case "/exit", "/quit", "/q":
@@ -129,7 +148,7 @@ func (a *App) slash(ctx context.Context, cfg *config.Config, ui *UI, rt *Runtime
 	case "/help", "/?":
 		say("%s", helpText)
 	case "/clear":
-		fmt.Fprint(a.Out, "\033[H\033[2J")
+		fmt.Fprint(out, "\033[H\033[2J")
 	case "/reset":
 		fresh, err := newRuntime(cfg, ui, nil)
 		if err != nil {
@@ -140,7 +159,7 @@ func (a *App) slash(ctx context.Context, cfg *config.Config, ui *UI, rt *Runtime
 		say("%s", ui.c(cYellow, "Context cleared. New session "+fresh.Session.ID))
 		return false, fresh
 	case "/config":
-		a.printConfig(cfg)
+		a.printConfig(cfg, out)
 	case "/status":
 		say("session   %s (%d tasks)\nmodel     %s\napproval  %s\nworkspace %s\nlimits    %d steps/task, %s per tool, %s per task",
 			rt.Session.ID, len(rt.Session.Tasks), cfg.Model, cfg.Approval, cfg.Workspace, cfg.MaxSteps, cfg.ToolTimeout, cfg.TaskTimeout)

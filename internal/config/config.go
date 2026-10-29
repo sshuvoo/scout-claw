@@ -10,7 +10,6 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -207,9 +206,9 @@ func resolveStateDir(v string) (string, error) {
 // LoadDotEnv loads KEY=VALUE files without overriding existing variables.
 func LoadDotEnv() {
 	parseEnvFile(".env")
-	if u, err := user.Current(); err == nil && u.HomeDir != "" {
+	if home, err := os.UserHomeDir(); err == nil && home != "" { // honours $HOME, like UserEnvPath
 		for _, n := range []string{".scoutclaw.env", ".scout.env", ".env"} {
-			parseEnvFile(filepath.Join(u.HomeDir, n))
+			parseEnvFile(filepath.Join(home, n))
 		}
 	}
 }

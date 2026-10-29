@@ -75,7 +75,8 @@ scout run --resume last "Now also check the logs"            # continue a sessio
 | Command | What it does |
 |---|---|
 | `run <task>` | Run one task and exit. Exit code is non-zero if the task was cancelled, hit a limit, failed or ended unresolved. |
-| `chat` | Interactive session; follow-ups keep the conversation. Slash commands inside chat: `/help`, `/config`, `/status`, `/model [name]`, `/approval [ask\|auto\|readonly]`, `/key` (set API key), `/history`, `/clear`, `/reset`, `/exit`. `/model` and `/approval` last for the session. |
+| `chat` | Full-screen chat with the input box pinned to the bottom, a live status bar (model, approvals, workspace, tokens, spinner with the running command), scrollback (PgUp/PgDn, mouse wheel), prompt history (↑/↓), slash-command autocomplete (Tab) and an inline approval panel. Ctrl+J inserts a newline, Ctrl+C cancels the task, Ctrl+D quits. `--plain` (or a non-terminal) uses the simple line-based mode. Interactive session; follow-ups keep the conversation. Slash commands inside chat: `/help`, `/config`, `/status`, `/model [name]`, `/approval [ask\|auto\|readonly]`, `/key` (set API key), `/history`, `/clear`, `/reset`, `/exit`. `/model` and `/approval` last for the session. |
+| `update [--check] [--version vX.Y.Z]` | Update scout in place: downloads the release for your OS/arch, verifies its SHA-256 and replaces the running executable. |
 | `setup` | Enter your API key once (hidden input); saved for all future runs. |
 | `doctor [--online]` | Checks config, state dir, optional tools, DNS/TCP to the API host; `--online` sends one tiny request to prove key and model work. |
 | `status` | Version, platform, limits, session counts, last session, audit log — no secrets. |
