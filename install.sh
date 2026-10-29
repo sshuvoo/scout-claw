@@ -39,4 +39,4 @@ mkdir -p "$DIR"
 install -m 0755 "$tmp/scout" "$DIR/scout"
 echo "installed $DIR/scout"
 case ":$PATH:" in *":$DIR:"*) ;; *) echo "add to your shell profile:  export PATH=\"$DIR:\$PATH\"";; esac
-echo "next: set OPENAI_API_KEY (see .env.example), then run: scout doctor"
+echo "next: run  scout setup  (stores your OpenAI API key), then  scout doctor --online"
