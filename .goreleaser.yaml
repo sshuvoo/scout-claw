@@ -1,0 +1,23 @@
+# GoReleaser configuration (not exercised in CI yet; run `goreleaser check` first).
+version: 2
+project_name: scoutclaw
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+builds:
+  - id: scout
+    main: ./cmd/scout
+    binary: scout
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X scoutclaw/internal/cli.Version={{.Version}}
+archives:
+  # archive name matches install.sh: scoutclaw_<version>_<os>_<arch>.tar.gz
+  - formats: [tar.gz]
+checksum:
+  name_template: checksums.txt
+changelog:
+  sort: asc
