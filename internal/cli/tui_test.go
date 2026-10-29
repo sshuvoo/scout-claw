@@ -219,3 +219,79 @@ func TestKeyModeMasksInput(t *testing.T) {
 		t.Fatal("Esc must cancel and clear the key")
 	}
 }
+
+func TestLandingScreenIsCenteredThenSwitchesToPinnedLayout(t *testing.T) {
+	m := newTestTUI(t, 120, 40)
+	if !m.landing() {
+		t.Fatal("fresh session must show the landing screen")
+	}
+	ls := lines(m)
+	if len(ls) != 40 {
+		t.Fatalf("%d lines", len(ls))
+	}
+	top, bottom := -1, -1
+	for i, l := range ls {
+		if strings.Contains(l, "╭") && top < 0 {
+			top = i
+		}
+		if strings.Contains(l, "╰") {
+			bottom = i
+		}
+	}
+	if top < 12 || bottom > 30 {
+		t.Fatalf("input box should sit near the vertical centre, got rows %d-%d", top, bottom)
+	}
+	left := strings.Index(ls[top], "╭")
+	right := len([]rune(strings.TrimRight(ls[top], " "))) - 1
+	if left < 10 || abs((left)-(120-1-right)) > 1 {
+		t.Fatalf("input box should be horizontally centred: left=%d right-gap=%d", left, 120-1-right)
+	}
+	if !strings.Contains(strings.Join(ls, "\n"), "Autonomous on-device diagnostic agent") {
+		t.Fatal("tagline missing")
+	}
+	if !strings.Contains(ls[39], "ready") {
+		t.Fatalf("status bar stays at the bottom: %q", ls[39])
+	}
+
+	// typing "/" keeps the screen stable and shows the command list under the box
+	press(m, "/mo")
+	v := ansi.Strip(m.View())
+	if !strings.Contains(v, "/model") || len(strings.Split(v, "\n")) != 40 {
+		t.Fatalf("popup on landing broke layout:\n%s", v)
+	}
+
+	// after the first prompt the input is pinned to the bottom as before
+	m.hadTask = true
+	m.layout()
+	ls = lines(m)
+	if m.landing() || !strings.HasPrefix(ls[len(ls)-2], "╰") || !strings.HasPrefix(ls[len(ls)-4], "╭") {
+		t.Fatalf("expected the pinned layout after the first task:\n%s", strings.Join(ls[len(ls)-6:], "\n"))
+	}
+	if left := strings.Index(ls[len(ls)-4], "╭"); left != 0 {
+		t.Fatalf("pinned input box spans the full width, left=%d", left)
+	}
+}
+
+func TestLandingSurvivesTinyTerminalsAndShowsKeyNote(t *testing.T) {
+	m := newTestTUI(t, 50, 14)
+	m.enterKeyMode("No OpenAI API key found.")
+	v := ansi.Strip(m.View())
+	if !strings.Contains(v, "No OpenAI API key found.") || len(strings.Split(v, "\n")) != 14 {
+		t.Fatalf("%s", v)
+	}
+	for _, l := range strings.Split(v, "\n") {
+		if len([]rune(l)) > 50 {
+			t.Fatalf("overflow: %q", l)
+		}
+	}
+	if !m.landing() {
+		t.Fatal("key prompt should stay on the landing screen")
+	}
+}
+
+func abs(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
+}

@@ -117,7 +117,9 @@ type tuiModel struct {
 	sugIdx   int
 	tokensIn int64
 	tokensOu int64
-	firstKey bool // no API key at start
+	firstKey bool   // no API key at start
+	hadTask  bool   // a task has been started: leave the landing screen for good
+	note     string // message shown on the landing screen (e.g. first-run key prompt)
 	build    func() tea.Msg
 }
 
@@ -192,7 +194,6 @@ func (m *tuiModel) buildCmd() tea.Cmd { return m.build }
 // ---- tea.Model --------------------------------------------------------------
 
 func (m *tuiModel) Init() tea.Cmd {
-	m.appendRaw(m.welcome())
 	if m.firstKey {
 		m.enterKeyMode("No OpenAI API key found. Paste it below (input is masked, saved to ~/.scoutclaw.env with mode 600).")
 		return textarea.Blink
@@ -200,12 +201,44 @@ func (m *tuiModel) Init() tea.Cmd {
 	return tea.Batch(textarea.Blink, m.buildCmd())
 }
 
-func (m *tuiModel) welcome() string {
-	var b strings.Builder
-	b.WriteString(headerSt.Render(strings.TrimLeft(banner, "\n")) + "\n")
-	b.WriteString(dimSt.Render("Autonomous on-device diagnostic agent. Type a task in plain language; risky actions always ask first.") + "\n")
-	b.WriteString(dimSt.Render("Enter send · Ctrl+J newline · / commands · PgUp/PgDn scroll · Ctrl+C cancel · Ctrl+D quit") + "\n\n")
-	return b.String()
+// landing reports whether to show the centered start screen: nothing has been
+// said yet and no task or approval is in progress.
+func (m *tuiModel) landing() bool {
+	return !m.hadTask && m.transcript == "" && !m.running && m.approval == nil
+}
+
+func (m *tuiModel) boxW() int {
+	if m.landing() {
+		return min(m.w, 84)
+	}
+	return m.w
+}
+
+func (m *tuiModel) landingView() string {
+	bw := m.boxW()
+	fit := func(t string) string { return ansi.Truncate(t, m.w, "…") }
+	var parts []string
+	if m.w >= 56 && m.h >= 22 { // the banner needs room; Render pads the art into a rectangle so it centers as one block
+		parts = append(parts, headerSt.Render(strings.TrimLeft(banner, "\n")), "")
+	} else {
+		parts = append(parts, headerSt.Render("ScoutClaw"))
+	}
+	parts = append(parts,
+		fit(dimSt.Render("Autonomous on-device diagnostic agent")),
+		fit(dimSt.Render("Describe a problem in plain language. Risky actions always ask first.")),
+		"",
+		m.inputBox(),
+	)
+	if m.note != "" {
+		parts = append(parts, lipgloss.NewStyle().Foreground(warnCol).Width(min(bw, m.w)).Render(m.note))
+	}
+	if pop := m.popup(); pop != "" {
+		parts = append(parts, lipgloss.NewStyle().Width(bw).Render(pop))
+	} else {
+		parts = append(parts, fit(dimSt.Render("Enter send · Ctrl+J newline · / commands · Ctrl+C quit")))
+	}
+	block := lipgloss.JoinVertical(lipgloss.Center, parts...)
+	return lipgloss.Place(m.w, m.h-1, lipgloss.Center, lipgloss.Center, block) + "\n" + m.statusBar()
 }
 
 func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -234,7 +267,6 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.rt = msg.rt
-		m.appendRaw(dimSt.Render(fmt.Sprintf("session %s · model %s · approval %s · workspace %s", m.rt.Session.ID, m.cfg.Model, m.cfg.Approval, shortPath(m.cfg.Workspace))) + "\n\n")
 		return m, nil
 
 	case approvalMsg:
@@ -430,7 +462,9 @@ func (m *tuiModel) submit() tea.Cmd {
 	}
 	m.appendRaw("\n" + userSt.Render("❯ "+strings.ReplaceAll(text, "\n", "\n  ")) + "\n\n")
 	ctx, cancel := context.WithCancel(m.ctx)
-	m.cancel, m.running, m.started = cancel, true, time.Now()
+	m.cancel, m.running, m.started, m.hadTask = cancel, true, time.Now(), true
+	m.note = ""
+	m.layout()
 	rt := m.rt
 	run := func() tea.Msg {
 		defer cancel()
@@ -472,7 +506,11 @@ func (m *tuiModel) enterKeyMode(note string) {
 	m.ki.SetValue("")
 	m.ki.Focus()
 	if note != "" {
-		m.appendRaw(m.ui.c(cYellow, note) + "\n")
+		if m.landing() {
+			m.note = note
+		} else {
+			m.appendRaw(m.ui.c(cYellow, note) + "\n")
+		}
 	}
 	m.layout()
 }
@@ -558,6 +596,7 @@ func clampIdx(i, n int) int {
 
 func (m *tuiModel) appendRaw(s string) {
 	m.transcript += s
+	m.layout() // leaving the landing screen changes the input box width
 	m.refresh(false)
 }
 
@@ -592,16 +631,16 @@ func (m *tuiModel) layout() {
 	if m.w == 0 {
 		return
 	}
-	m.ta.SetWidth(m.w - 4)
+	m.ta.SetWidth(m.boxW() - 4)
 	m.ta.SetHeight(m.inputHeight())
-	m.ki.Width = m.w - 16
+	m.ki.Width = m.boxW() - 16
 	box := 1 + 2 // content + border
 	if m.approval != nil {
 		box = m.approvalBoxHeight()
 	} else {
 		box = m.inputHeight() + 2
 	}
-	h := m.h - 1 - box - m.popupHeight() - 1 // header, input box, popup, status bar
+	h := m.h - 1 - box - m.popupHeight() - 1 // header, input box, popup, status bar (chat layout)
 	m.vp.Width, m.vp.Height = m.w, max(h, 3)
 }
 
@@ -610,6 +649,9 @@ func (m *tuiModel) approvalBoxHeight() int { return 4 } // two content lines + b
 func (m *tuiModel) View() string {
 	if m.w == 0 {
 		return ""
+	}
+	if m.landing() {
+		return m.landingView()
 	}
 	header := headerSt.Render("ScoutClaw") + dimSt.Render("  ·  autonomous diagnostic agent")
 	if m.rt != nil {
@@ -625,7 +667,7 @@ func (m *tuiModel) View() string {
 }
 
 func (m *tuiModel) boxStyle(color lipgloss.Color) lipgloss.Style {
-	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(color).Width(m.w - 2)
+	return lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(color).Width(m.boxW() - 2)
 }
 
 func (m *tuiModel) inputBox() string {
