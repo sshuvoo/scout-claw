@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -56,7 +58,7 @@ func (a *App) chat(cmd *cobra.Command) error {
 	ui := a.newUI()
 	if cfg.APIKey == "" && a.stdinT {
 		fmt.Fprintln(a.Out, ui.c(cYellow, "No OPENAI_API_KEY found."))
-		if err := a.promptForKey(cmd.Context(), cfg, ui); err != nil {
+		if err := a.promptForKey(cmd.Context(), cfg, ui, false); err != nil {
 			return err
 		}
 	}
@@ -174,7 +176,7 @@ func (a *App) slash(ctx context.Context, cfg *config.Config, ui *UI, rt *Runtime
 			say("%s", ui.c(cRed, "unknown mode; use ask, auto or readonly"))
 		}
 	case "/key":
-		if err := a.promptForKey(ctx, cfg, ui); err != nil {
+		if err := a.promptForKey(ctx, cfg, ui, false); err != nil {
 			say("%s", ui.c(cRed, err.Error()))
 			break
 		}
@@ -210,32 +212,35 @@ func (a *App) slash(ctx context.Context, cfg *config.Config, ui *UI, rt *Runtime
 	return false, nil
 }
 
-// promptForKey reads the API key without echo, stores it in ~/.scoutclaw.env
-// (mode 0600) and applies it to the running configuration.
-func (a *App) promptForKey(ctx context.Context, cfg *config.Config, ui *UI) error {
-	if !a.stdinT {
-		return errors.New("/key needs an interactive terminal; put OPENAI_API_KEY in ~/.scoutclaw.env instead")
+// promptForKey reads the API key with "*" feedback, stores it in
+// ~/.scoutclaw.env (mode 0600) and applies it to the running configuration.
+// With allowPipe (scout setup) a key piped on stdin is accepted without a terminal.
+func (a *App) promptForKey(ctx context.Context, cfg *config.Config, ui *UI, allowPipe bool) error {
+	if !a.stdinT && !allowPipe {
+		return errors.New("/key needs an interactive terminal; run `scout setup` in a shell instead")
 	}
 	path, err := config.UserEnvPath()
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(a.Out, "Enter your OpenAI API key (input hidden; saved to %s, mode 600): ", path)
-	hide := exec.Command("stty", "-echo")
-	hide.Stdin = os.Stdin
-	hidden := hide.Run() == nil
-	if !hidden {
-		fmt.Fprintln(a.Out, "\n(could not disable echo; the key will be visible)")
-	}
-	line, rerr := ui.In.ReadLine(ctx)
-	if hidden {
-		show := exec.Command("stty", "echo")
-		show.Stdin = os.Stdin
-		_ = show.Run()
-		fmt.Fprintln(a.Out)
-	}
-	if rerr != nil {
-		return rerr
+	var line string
+	if a.stdinT {
+		fmt.Fprintf(a.Out, "Paste your OpenAI API key and press Enter (Ctrl+Shift+V pastes in most terminals).\n"+
+			"Characters appear as *, Ctrl-C cancels. Saved to %s (mode 600).\nAPI key: ", path)
+		restore := rawNoEcho()
+		pctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+		line, err = ui.In.ReadSecret(pctx)
+		stop()
+		restore()
+		if err != nil {
+			fmt.Fprintln(a.Out)
+			if ctx.Err() == nil && errors.Is(err, context.Canceled) {
+				return errors.New("cancelled; nothing changed")
+			}
+			return err
+		}
+	} else if line, err = ui.In.ReadLine(ctx); err != nil {
+		return errors.New("no key received on stdin")
 	}
 	key := strings.TrimSpace(line)
 	if key == "" {
@@ -246,5 +251,30 @@ func (a *App) promptForKey(ctx context.Context, cfg *config.Config, ui *UI) erro
 	}
 	os.Setenv(config.EnvAPIKey, key)
 	cfg.APIKey = key
+	fmt.Fprintf(a.Out, "Received %d characters.\n", len(key))
+	if !strings.HasPrefix(key, "sk-") {
+		fmt.Fprintln(a.Out, ui.c(cYellow, "note: OpenAI keys normally start with \"sk-\"; check with: scout doctor --online"))
+	}
 	return nil
+}
+
+// rawNoEcho switches the terminal to unbuffered, no-echo input and returns a
+// function that restores the previous settings (also used on Ctrl-C).
+func rawNoEcho() func() {
+	get := exec.Command("stty", "-g")
+	get.Stdin = os.Stdin
+	saved, err := get.Output()
+	if err != nil {
+		return func() {}
+	}
+	set := exec.Command("stty", "-icanon", "-echo", "min", "1")
+	set.Stdin = os.Stdin
+	if set.Run() != nil {
+		return func() {}
+	}
+	return func() {
+		r := exec.Command("stty", strings.TrimSpace(string(saved)))
+		r.Stdin = os.Stdin
+		_ = r.Run()
+	}
 }

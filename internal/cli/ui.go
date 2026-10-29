@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"scoutclaw/internal/agent"
@@ -252,29 +253,69 @@ func clipLines(s string, n int) string {
 	return strings.Join(lines[:n], "\n") + fmt.Sprintf("\n… (%d more lines)", len(lines)-n)
 }
 
-// Input reads lines from a reader on a single goroutine so that a blocked read
-// never prevents cancellation and prompts never race each other.
+// Input reads user input on a single goroutine so that a blocked read never
+// prevents cancellation and prompts never race each other. In secret mode it
+// echoes "*" per character (the terminal itself is switched to non-canonical,
+// no-echo mode by the caller) and handles backspace and pasted escape codes.
 type Input struct {
-	lines chan string
-	done  chan struct{}
+	lines  chan string
+	done   chan struct{}
+	secret atomic.Bool
+	out    io.Writer
 }
 
-func NewInput(r io.Reader) *Input {
-	in := &Input{lines: make(chan string), done: make(chan struct{})}
+func NewInput(r io.Reader, out io.Writer) *Input {
+	in := &Input{lines: make(chan string), done: make(chan struct{}), out: out}
 	go func() {
 		defer close(in.done)
 		br := bufio.NewReader(r)
+		var buf []byte
+		esc := false
 		for {
-			line, err := br.ReadString('\n')
-			if line != "" {
-				in.lines <- strings.TrimRight(line, "\r\n")
-			}
+			c, err := br.ReadByte()
 			if err != nil {
+				if len(buf) > 0 {
+					in.lines <- strings.TrimRight(string(buf), "\r\n")
+				}
 				return
+			}
+			switch {
+			case esc: // swallow an escape sequence such as bracketed-paste markers
+				if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '~' {
+					esc = false
+				}
+			case c == 0x1b:
+				esc = true
+			case c == '\n' || c == '\r':
+				if in.secret.Load() {
+					fmt.Fprintln(in.out)
+				}
+				in.lines <- strings.TrimRight(string(buf), "\r\n")
+				buf = buf[:0]
+			case in.secret.Load() && (c == 0x7f || c == 0x08):
+				if len(buf) > 0 {
+					buf = buf[:len(buf)-1]
+					fmt.Fprint(in.out, "\b \b")
+				}
+			case in.secret.Load() && c < 0x20:
+				// ignore other control characters
+			default:
+				buf = append(buf, c)
+				if in.secret.Load() {
+					fmt.Fprint(in.out, "*")
+				}
 			}
 		}
 	}()
 	return in
+}
+
+// ReadSecret reads one line with "*" echo. The caller must have put the terminal
+// into non-canonical, no-echo mode.
+func (in *Input) ReadSecret(ctx context.Context) (string, error) {
+	in.secret.Store(true)
+	defer in.secret.Store(false)
+	return in.ReadLine(ctx)
 }
 
 var errEOF = errors.New("end of input")

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -225,4 +227,37 @@ func TestApprovalSwitchAppliesToPolicy(t *testing.T) {
 			return &llm.Response{Text: "denied"}, nil
 		})
 	h.run("chat")
+}
+
+func TestInputSecretModeMasksAndEdits(t *testing.T) {
+	var out bytes.Buffer
+	in := NewInput(strings.NewReader("sk-abc\x7fd\x1b[200~xyz\x1b[201~\nnormal line\n"), &out)
+	got, err := in.ReadSecret(context.Background())
+	if err != nil || got != "sk-abdxyz" {
+		t.Fatalf("%q %v", got, err)
+	}
+	if strings.Contains(out.String(), "abc") || !strings.Contains(out.String(), "*") {
+		t.Fatalf("secret echoed or not masked: %q", out.String())
+	}
+	line, _ := in.ReadLine(context.Background())
+	if line != "normal line" || strings.Contains(out.String(), "normal") {
+		t.Fatalf("non-secret input must not be masked: %q", line)
+	}
+}
+
+func TestSetupAcceptsPipedKey(t *testing.T) {
+	h := newHarness(t, "sk-piped-key-1234567890\n")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv(config.EnvAPIKey, "")
+	if code := h.run("setup"); code != 0 {
+		t.Fatalf("%s", h.errb.String())
+	}
+	b, err := os.ReadFile(filepath.Join(home, ".scoutclaw.env"))
+	if err != nil || !strings.Contains(string(b), "OPENAI_API_KEY=sk-piped-key-1234567890") {
+		t.Fatalf("%v %q", err, b)
+	}
+	if strings.Contains(h.out.String(), "piped-key") {
+		t.Fatalf("key echoed: %s", h.out.String())
+	}
 }

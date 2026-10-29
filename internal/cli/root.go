@@ -114,10 +114,10 @@ fix (with your approval for anything risky) and verifies the result.
 			if err != nil {
 				return err
 			}
-			if err := a.promptForKey(cmd.Context(), cfg, a.newUI()); err != nil {
+			if err := a.promptForKey(cmd.Context(), cfg, a.newUI(), true); err != nil {
 				return err
 			}
-			fmt.Fprintf(a.Out, "Saved (%s). Verify with: scout doctor --online\n", cfg.MaskedKey())
+			fmt.Fprintf(a.Out, "Saved. Now verify it with: scout doctor --online\n")
 			return nil
 		},
 	}
@@ -151,7 +151,7 @@ func (a *App) loadConfig(cmd *cobra.Command) (*config.Config, error) {
 func (a *App) newUI() *UI {
 	color := !a.fl.noColor && os.Getenv("NO_COLOR") == "" && a.Out == io.Writer(os.Stdout) && isTerminal(os.Stdout)
 	if a.input == nil {
-		a.input = NewInput(a.In)
+		a.input = NewInput(a.In, a.Out)
 	}
 	return &UI{Out: a.Out, Err: a.Err, In: a.input, Color: color, Interactive: a.stdinT, Verbose: a.fl.verbose}
 }
