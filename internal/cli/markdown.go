@@ -50,8 +50,8 @@ func renderMarkdown(src string, width int) string {
 }
 
 // codeCard syntax-highlights a fenced code block's body and wraps it in a
-// rounded, accent-bordered box with a small language caption above it, so
-// code reads as a distinct block rather than blending into the prose.
+// rounded, accent-bordered box so code reads as a distinct block rather than
+// blending into the prose.
 func codeCard(code, lang string, width int) string {
 	var buf bytes.Buffer
 	if err := quick.Highlight(&buf, strings.TrimRight(code, "\n"), lang, "terminal16m", "catppuccin-mocha"); err != nil {
@@ -69,12 +69,7 @@ func codeCard(code, lang string, width int) string {
 		Width(boxW).
 		Render(strings.TrimRight(buf.String(), "\n"))
 
-	label := lang
-	if label == "" {
-		label = "code"
-	}
-	caption := lipgloss.NewStyle().Foreground(accent).Render("▍ " + label)
-	return indentLines(caption+"\n"+box, "  ")
+	return indentLines(box, "  ")
 }
 
 func indentLines(s, prefix string) string {
