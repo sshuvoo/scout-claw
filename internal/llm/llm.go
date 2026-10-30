@@ -36,6 +36,10 @@ type Request struct {
 	ToolOutputs  []ToolOutput
 	Tools        []ToolSpec
 	PreviousID   string
+
+	// OnDelta, if set, is called with each chunk of output text as it streams
+	// in, in order, before Generate returns. It must be cheap and non-blocking.
+	OnDelta func(string)
 }
 
 type Usage struct {

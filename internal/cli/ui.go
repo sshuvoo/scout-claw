@@ -53,8 +53,11 @@ func (u *UI) c(code, s string) string {
 	return code + s + cReset
 }
 
-func (u *UI) Thought(text string) {
-	fmt.Fprintln(u.Out, u.c(cGray, indent(text, "  ")))
+// Delta writes a chunk of the model's output text as it streams in. Plain, no
+// styling: at this point we don't yet know whether the text is a thought
+// before a tool call or the final answer, so it can't be colored by role.
+func (u *UI) Delta(text string) {
+	fmt.Fprint(u.Out, text)
 }
 
 func (u *UI) Plan(steps []task.Step, hypothesis string) {
@@ -194,16 +197,12 @@ func (u *UI) PrintResult(r agent.Result) {
 			label = "Stopped: repeated failures without progress"
 		}
 		fmt.Fprintln(u.Out, u.c(cYellow+cBold, "⚠ "+label)+" — "+errText(r.Err))
-		if r.Text != "" {
-			fmt.Fprintln(u.Out, "\n"+r.Text)
-		}
 		fmt.Fprintln(u.Out, u.c(cYellow, "Outcome is not verified."))
 		return
 	}
 
 	rep := r.Report
 	if rep == nil {
-		fmt.Fprintln(u.Out, u.c(cBold+cGreen, r.Text))
 		if r.Verify == verify.Unverified {
 			fmt.Fprintln(u.Out, u.c(cYellow, "\n⚠ Changes were made during this task but no verification step succeeded afterwards."))
 		}

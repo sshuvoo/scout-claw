@@ -34,6 +34,9 @@ func (s *Scripted) Generate(ctx context.Context, req Request) (*Response, error)
 	if resp != nil && resp.ID == "" {
 		resp.ID = fmt.Sprintf("resp_%d", s.n)
 	}
+	if resp != nil && resp.Text != "" && req.OnDelta != nil {
+		req.OnDelta(resp.Text) // simulate streaming, as the real provider does
+	}
 	return resp, err
 }
 

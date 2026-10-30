@@ -31,7 +31,7 @@ const (
 
 // Reporter receives progress for display. All methods must be cheap and non-blocking.
 type Reporter interface {
-	Thought(text string)
+	Delta(text string) // a chunk of the model's output text, as it streams in
 	Plan(steps []task.Step, hypothesis string)
 	ToolStart(summary string)
 	ToolEnd(o executor.Outcome)
@@ -40,7 +40,7 @@ type Reporter interface {
 
 type nopReporter struct{}
 
-func (nopReporter) Thought(string)           {}
+func (nopReporter) Delta(string)             {}
 func (nopReporter) Plan([]task.Step, string) {}
 func (nopReporter) ToolStart(string)         {}
 func (nopReporter) ToolEnd(executor.Outcome) {}
@@ -119,6 +119,7 @@ func (a *Agent) loop(ctx context.Context, prompt string, rep Reporter) (res Resu
 		ToolOutputs:  a.Carry,
 		Tools:        a.specs(),
 		PreviousID:   a.PreviousID,
+		OnDelta:      rep.Delta,
 	}
 	// pending holds outputs the provider still expects; whatever is undelivered
 	// when the task ends is carried into the next task of this session.
@@ -146,7 +147,7 @@ func (a *Agent) loop(ctx context.Context, prompt string, rep Reporter) (res Resu
 			switch {
 			case resp.Incomplete != "":
 				rep.Notice("model stopped early (" + resp.Incomplete + "); asking it to continue")
-				req = llm.Request{Instructions: SystemPrompt, UserText: "Your last response was cut off. Continue, concisely: call a tool or finish.", Tools: a.specs(), PreviousID: a.PreviousID}
+				req = llm.Request{Instructions: SystemPrompt, UserText: "Your last response was cut off. Continue, concisely: call a tool or finish.", Tools: a.specs(), PreviousID: a.PreviousID, OnDelta: rep.Delta}
 				continue
 			case strings.TrimSpace(resp.Text) == "":
 				empty++
@@ -154,7 +155,7 @@ func (a *Agent) loop(ctx context.Context, prompt string, rep Reporter) (res Resu
 					res.Status, res.Err = StatusError, errors.New("the model returned empty responses repeatedly")
 					return res
 				}
-				req = llm.Request{Instructions: SystemPrompt, UserText: "Your last response was empty. Call a tool to continue, or call finish.", Tools: a.specs(), PreviousID: a.PreviousID}
+				req = llm.Request{Instructions: SystemPrompt, UserText: "Your last response was empty. Call a tool to continue, or call finish.", Tools: a.specs(), PreviousID: a.PreviousID, OnDelta: rep.Delta}
 				continue
 			}
 			// A plain-text answer ends the task. Its verification status is judged
@@ -168,8 +169,8 @@ func (a *Agent) loop(ctx context.Context, prompt string, rep Reporter) (res Resu
 			return res
 		}
 
-		if t := strings.TrimSpace(resp.Text); t != "" {
-			rep.Thought(t)
+		if strings.TrimSpace(resp.Text) != "" {
+			rep.Delta("\n") // the thought itself already streamed in via Delta
 		}
 		var outputs []llm.ToolOutput
 		pending = unanswered(resp.ToolCalls, outputs)
@@ -204,7 +205,7 @@ func (a *Agent) loop(ctx context.Context, prompt string, rep Reporter) (res Resu
 		if ctx.Err() != nil {
 			return a.ended(ctx, res)
 		}
-		req = llm.Request{Instructions: SystemPrompt, ToolOutputs: outputs, Tools: a.specs(), PreviousID: a.PreviousID}
+		req = llm.Request{Instructions: SystemPrompt, ToolOutputs: outputs, Tools: a.specs(), PreviousID: a.PreviousID, OnDelta: rep.Delta}
 		if consecFail >= a.Limits.MaxConsecutiveFails {
 			res.Status = StatusStuck
 			res = a.wrapUp(ctx, res, &req, fmt.Sprintf("%d tool calls in a row failed", consecFail))

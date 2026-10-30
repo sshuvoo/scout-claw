@@ -69,7 +69,7 @@ func (o *OpenAI) Generate(ctx context.Context, req Request) (*Response, error) {
 		params.Tools = append(params.Tools, tp)
 	}
 
-	resp, err := o.client.Responses.New(ctx, params)
+	resp, err := o.stream(ctx, params, req.OnDelta)
 	if err != nil {
 		return nil, classify(ctx, err)
 	}
@@ -94,6 +94,33 @@ func (o *OpenAI) Generate(ctx context.Context, req Request) (*Response, error) {
 		return nil, &Error{Kind: ErrTransient, Err: errors.New("model response failed: " + resp.Error.Message)}
 	}
 	return out, nil
+}
+
+// stream runs the request through the Responses streaming API, forwarding
+// output-text deltas to onDelta as they arrive, and returns the final response
+// once the stream completes.
+func (o *OpenAI) stream(ctx context.Context, params responses.ResponseNewParams, onDelta func(string)) (*responses.Response, error) {
+	s := o.client.Responses.NewStreaming(ctx, params)
+	defer s.Close()
+	var final *responses.Response
+	for s.Next() {
+		ev := s.Current()
+		switch ev.Type {
+		case "response.output_text.delta":
+			if onDelta != nil && ev.Delta != "" {
+				onDelta(ev.Delta)
+			}
+		case "response.completed", "response.failed", "response.incomplete":
+			final = &ev.Response
+		}
+	}
+	if err := s.Err(); err != nil {
+		return nil, err
+	}
+	if final == nil {
+		return nil, errors.New("model stream ended without a final response")
+	}
+	return final, nil
 }
 
 func classify(ctx context.Context, err error) error {
