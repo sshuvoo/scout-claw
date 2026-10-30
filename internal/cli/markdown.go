@@ -5,13 +5,50 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
+	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/quick"
+	chromastyles "github.com/alecthomas/chroma/v2/styles"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/glamour/ansi"
 	"github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
 )
+
+// codeBG is the fill color for code cards: catppuccin-mocha's own base
+// background, so the highlighted tokens (drawn from that same palette) read
+// correctly against it.
+const codeBG = "#1e1e2e"
+
+// codeChromaStyleName is "catppuccin-mocha" with codeBG baked into every
+// token's own style entry, registered once under this name. Chroma's
+// terminal formatters only paint the background a token carries itself - a
+// separately-set "default" background does not survive the reset each token
+// emits - so the base theme's background must be copied onto each entry
+// individually to get a filled card instead of highlighted text floating on
+// the terminal's own background.
+const codeChromaStyleName = "scoutclaw-code"
+
+var registerCodeChromaStyle = sync.OnceFunc(func() {
+	base := chromastyles.Get("catppuccin-mocha")
+	entries := chroma.StyleEntries{}
+	for _, tt := range []chroma.TokenType{
+		chroma.Background, chroma.Text, chroma.Error, chroma.Comment, chroma.CommentPreproc,
+		chroma.Keyword, chroma.KeywordReserved, chroma.KeywordNamespace, chroma.KeywordType,
+		chroma.Operator, chroma.Punctuation, chroma.Name, chroma.NameBuiltin, chroma.NameTag,
+		chroma.NameAttribute, chroma.NameClass, chroma.NameConstant, chroma.NameDecorator,
+		chroma.NameException, chroma.NameFunction, chroma.NameOther, chroma.Literal,
+		chroma.LiteralNumber, chroma.LiteralDate, chroma.LiteralString, chroma.LiteralStringEscape,
+		chroma.GenericDeleted, chroma.GenericEmph, chroma.GenericInserted, chroma.GenericStrong,
+		chroma.GenericSubheading,
+	} {
+		e := base.Get(tt)
+		e.Background = chroma.MustParseColour(codeBG)
+		entries[tt] = e.String()
+	}
+	chromastyles.Register(chroma.MustNewStyle(codeChromaStyleName, entries))
+})
 
 // fencedCodeRe matches a fenced code block and captures its language tag (if
 // any) and body, so it can be pulled out and rendered as its own bordered
@@ -20,7 +57,7 @@ var fencedCodeRe = regexp.MustCompile("(?s)```[ \t]*([a-zA-Z0-9_+-]*)[ \t]*\r?\n
 
 // renderMarkdown renders src as styled, wrapped terminal output: headings,
 // lists, quotes, and emphasis through a glamour style tuned to the app's
-// accent color, and fenced code blocks as bordered, syntax-highlighted cards.
+// accent color, and fenced code blocks as shaded, syntax-highlighted cards.
 // On any failure it falls back to the raw source so a rendering bug never
 // loses text.
 func renderMarkdown(src string, width int) string {
@@ -49,23 +86,23 @@ func renderMarkdown(src string, width int) string {
 	return strings.TrimRight(out, "\n") + "\n"
 }
 
-// codeCard syntax-highlights a fenced code block's body and wraps it in a
-// rounded, accent-bordered box so code reads as a distinct block rather than
-// blending into the prose.
+// codeCard syntax-highlights a fenced code block's body and fills it with a
+// solid background so it reads as a distinct block rather than blending into
+// the prose.
 func codeCard(code, lang string, width int) string {
+	registerCodeChromaStyle()
 	var buf bytes.Buffer
-	if err := quick.Highlight(&buf, strings.TrimRight(code, "\n"), lang, "terminal16m", "catppuccin-mocha"); err != nil {
+	if err := quick.Highlight(&buf, strings.TrimRight(code, "\n"), lang, "terminal16m", codeChromaStyleName); err != nil {
 		buf.Reset()
 		buf.WriteString(code)
 	}
-	boxW := width - 6 // document margin (2) + border (2) + a little breathing room
+	boxW := width - 4 // document margin (2) + a little breathing room
 	if boxW < 20 {
 		boxW = 20
 	}
 	box := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(accent).
-		Padding(0, 1).
+		Background(lipgloss.Color(codeBG)).
+		Padding(0, 2).
 		Width(boxW).
 		Render(strings.TrimRight(buf.String(), "\n"))
 
