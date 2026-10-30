@@ -50,14 +50,15 @@ func TestInputBoxAndStatusStickToBottom(t *testing.T) {
 	if len(ls) != 24 {
 		t.Fatalf("view must fill exactly the terminal: %d lines", len(ls))
 	}
-	if !strings.HasPrefix(ls[len(ls)-2], "╰") || !strings.HasPrefix(ls[len(ls)-4], "╭") {
+	pad := strings.Repeat(" ", hPad)
+	if !strings.HasPrefix(ls[len(ls)-2], pad+"╰") || !strings.HasPrefix(ls[len(ls)-4], pad+"╭") {
 		t.Fatalf("input box must be pinned just above the status bar:\n%s", strings.Join(ls[len(ls)-5:], "\n"))
 	}
 	if !strings.Contains(ls[len(ls)-1], "ready") || !strings.Contains(ls[len(ls)-1], "gpt-test") {
 		t.Fatalf("status bar: %q", ls[len(ls)-1])
 	}
-	if !strings.Contains(ls[0], "ScoutClaw") {
-		t.Fatalf("header: %q", ls[0])
+	if !strings.Contains(ls[1], "ScoutClaw") {
+		t.Fatalf("header: %q", ls[1])
 	}
 }
 
@@ -260,15 +261,17 @@ func TestLandingScreenIsCenteredThenSwitchesToPinnedLayout(t *testing.T) {
 		t.Fatalf("popup on landing broke layout:\n%s", v)
 	}
 
-	// after the first prompt the input is pinned to the bottom as before
+	// after the first prompt the input is pinned to the bottom, indented by
+	// the chat view's left/right margin
 	m.hadTask = true
 	m.layout()
 	ls = lines(m)
-	if m.landing() || !strings.HasPrefix(ls[len(ls)-2], "╰") || !strings.HasPrefix(ls[len(ls)-4], "╭") {
+	pad := strings.Repeat(" ", hPad)
+	if m.landing() || !strings.HasPrefix(ls[len(ls)-2], pad+"╰") || !strings.HasPrefix(ls[len(ls)-4], pad+"╭") {
 		t.Fatalf("expected the pinned layout after the first task:\n%s", strings.Join(ls[len(ls)-6:], "\n"))
 	}
-	if left := strings.Index(ls[len(ls)-4], "╭"); left != 0 {
-		t.Fatalf("pinned input box spans the full width, left=%d", left)
+	if left := strings.Index(ls[len(ls)-4], "╭"); left != hPad {
+		t.Fatalf("pinned input box should sit %d columns in, left=%d", hPad, left)
 	}
 }
 

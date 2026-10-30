@@ -214,11 +214,18 @@ func (m *tuiModel) landing() bool {
 	return !m.hadTask && m.transcript == "" && !m.running && m.approval == nil
 }
 
+// hPad is the left/right margin around the chat view, so header, transcript,
+// input box, and status bar never sit flush against the terminal's edges.
+const hPad = 2
+
+// innerW is the usable width inside that margin for the non-landing layout.
+func (m *tuiModel) innerW() int { return max(m.w-2*hPad, 20) }
+
 func (m *tuiModel) boxW() int {
 	if m.landing() {
 		return min(m.w, 84)
 	}
-	return m.w
+	return m.innerW()
 }
 
 func (m *tuiModel) landingView() string {
@@ -245,7 +252,7 @@ func (m *tuiModel) landingView() string {
 		parts = append(parts, fit(dimSt.Render("Enter send · Ctrl+J newline · / commands · Ctrl+C quit")))
 	}
 	block := lipgloss.JoinVertical(lipgloss.Center, parts...)
-	return lipgloss.Place(m.w, m.h-1, lipgloss.Center, lipgloss.Center, block) + "\n" + m.statusBar()
+	return lipgloss.Place(m.w, m.h-1, lipgloss.Center, lipgloss.Center, block) + "\n" + m.statusBar(m.w)
 }
 
 func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -253,7 +260,6 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
-		m.ui.Width = max(m.w-4, 20)
 		m.layout()
 		m.refresh(false)
 		return m, nil
@@ -640,7 +646,7 @@ func (m *tuiModel) refresh(forceBottom bool) {
 		return
 	}
 	atBottom := m.vp.AtBottom() || forceBottom
-	m.vp.SetContent(ansi.Wrap(m.transcript+m.streaming, max(m.w-1, 10), " "))
+	m.vp.SetContent(ansi.Wrap(m.transcript+m.streaming, max(m.innerW()-1, 10), " "))
 	if atBottom {
 		m.vp.GotoBottom()
 	}
@@ -673,8 +679,9 @@ func (m *tuiModel) layout() {
 	} else {
 		box = m.inputHeight() + 2
 	}
-	h := m.h - 1 - box - m.popupHeight() - 1 // header, input box, popup, status bar (chat layout)
-	m.vp.Width, m.vp.Height = m.w, max(h, 3)
+	h := m.h - 2 - box - m.popupHeight() - 1 // top margin, header, input box, popup, status bar (chat layout)
+	m.vp.Width, m.vp.Height = m.innerW(), max(h, 3)
+	m.ui.Width = m.innerW()
 }
 
 func (m *tuiModel) approvalBoxHeight() int { return 4 } // two content lines + border
@@ -691,12 +698,24 @@ func (m *tuiModel) View() string {
 		header += dimSt.Render("  ·  session " + m.rt.Session.ID)
 	}
 
-	parts := []string{ansi.Truncate(header, m.w, "…"), m.vp.View()}
+	parts := []string{"", ansi.Truncate(header, m.innerW(), "…"), m.vp.View()}
 	if p := m.popup(); p != "" {
 		parts = append(parts, p)
 	}
-	parts = append(parts, m.inputBox(), m.statusBar())
-	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+	parts = append(parts, m.inputBox(), m.statusBar(m.innerW()))
+	return padLeft(lipgloss.JoinVertical(lipgloss.Left, parts...), hPad)
+}
+
+// padLeft indents every line of a multi-line, possibly ANSI-styled string by
+// n spaces, so the chat view keeps a margin instead of touching the
+// terminal's edges.
+func padLeft(s string, n int) string {
+	pad := strings.Repeat(" ", n)
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		lines[i] = pad + l
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m *tuiModel) boxStyle(color lipgloss.Color) lipgloss.Style {
@@ -746,7 +765,7 @@ func (m *tuiModel) popup() string {
 	return strings.Join(lines, "\n")
 }
 
-func (m *tuiModel) statusBar() string {
+func (m *tuiModel) statusBar(w int) string {
 	var left string
 	switch {
 	case m.approval != nil:
@@ -756,7 +775,7 @@ func (m *tuiModel) statusBar() string {
 		if m.activity != "" {
 			act = "$ " + m.activity
 		}
-		left = m.spin.View() + " " + ansi.Truncate(fmt.Sprintf("%s · %ds", act, int(time.Since(m.started).Seconds())), max(m.w/2, 10), "…") + dimSt.Render("  Ctrl+C cancels")
+		left = m.spin.View() + " " + ansi.Truncate(fmt.Sprintf("%s · %ds", act, int(time.Since(m.started).Seconds())), max(w/2, 10), "…") + dimSt.Render("  Ctrl+C cancels")
 	case m.quitArmed:
 		left = lipgloss.NewStyle().Foreground(warnCol).Render("press Ctrl+C again to quit")
 	case m.mode == modeKey:
@@ -774,12 +793,12 @@ func (m *tuiModel) statusBar() string {
 		m.cfg.Model,
 	} {
 		right = dimSt.Render(cand)
-		if m.w-lipgloss.Width(left)-lipgloss.Width(right) >= 3 {
+		if w-lipgloss.Width(left)-lipgloss.Width(right) >= 3 {
 			break
 		}
 		right = ""
 	}
-	gap := max(m.w-lipgloss.Width(left)-lipgloss.Width(right), 0)
+	gap := max(w-lipgloss.Width(left)-lipgloss.Width(right), 0)
 	return left + strings.Repeat(" ", gap) + right
 }
 
