@@ -16,10 +16,11 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// codeBG is the fill color for code cards: catppuccin-mocha's own base
-// background, so the highlighted tokens (drawn from that same palette) read
-// correctly against it.
-const codeBG = "#1e1e2e"
+// codeBG is the fill color for code cards: a subtle, near-black tint rather
+// than catppuccin-mocha's own (fairly saturated) base color, so the card
+// reads as a soft highlight instead of a heavy block against the chat's own
+// dark background.
+const codeBG = "#1c1d26"
 
 // codeChromaStyleName is "catppuccin-mocha" with codeBG baked into every
 // token's own style entry, registered once under this name. Chroma's
@@ -87,8 +88,9 @@ func renderMarkdown(src string, width int) string {
 }
 
 // codeCard syntax-highlights a fenced code block's body and fills it with a
-// solid background so it reads as a distinct block rather than blending into
-// the prose.
+// subtle background, rounded at the corners via a border colored to match
+// the fill (so the shape reads, not a hard line), so it reads as a distinct
+// block without a heavy box around it.
 func codeCard(code, lang string, width int) string {
 	registerCodeChromaStyle()
 	var buf bytes.Buffer
@@ -96,13 +98,16 @@ func codeCard(code, lang string, width int) string {
 		buf.Reset()
 		buf.WriteString(code)
 	}
-	boxW := width - 4 // document margin (2) + a little breathing room
+	boxW := width - 6 // document margin (2) + rounded corners (2) + a little breathing room
 	if boxW < 20 {
 		boxW = 20
 	}
+	bg := lipgloss.Color(codeBG)
 	box := lipgloss.NewStyle().
-		Background(lipgloss.Color(codeBG)).
-		Padding(0, 2).
+		Background(bg).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(bg).
+		Padding(1, 2).
 		Width(boxW).
 		Render(strings.TrimRight(buf.String(), "\n"))
 
