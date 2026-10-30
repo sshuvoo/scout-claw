@@ -48,10 +48,17 @@ type UI struct {
 	approveFn   func(context.Context, executor.ApprovalRequest) (executor.ApprovalResponse, error)
 	onStatus    func(string) // current activity, "" when idle
 	onDelta     func(string) // a streamed chunk, shown live before markdown rendering
+	onPreview   func(string) // the text so far, periodically re-rendered as markdown while streaming
 	onDeltaDone func(string) // the turn's text, rendered as markdown ("" if there was none)
 
-	deltaBuf strings.Builder
+	deltaBuf      strings.Builder
+	lastPreviewAt time.Time
 }
+
+// previewInterval caps how often the in-progress reply is re-rendered as
+// markdown while it streams in. Frequent enough to feel live, sparse enough
+// that re-running glamour/chroma on every few-byte chunk isn't wasted work.
+const previewInterval = 200 * time.Millisecond
 
 func (u *UI) c(code, s string) string {
 	if !u.Color {
@@ -61,11 +68,19 @@ func (u *UI) c(code, s string) string {
 }
 
 // Delta writes a chunk of the model's output text as it streams in, raw and
-// unstyled (markdown is only valid once the whole block has arrived).
+// unstyled, and periodically hands back a markdown-rendered snapshot of
+// everything accumulated so far so formatting appears progressively rather
+// than only once the whole reply has arrived.
 func (u *UI) Delta(text string) {
 	u.deltaBuf.WriteString(text)
 	if u.onDelta != nil {
 		u.onDelta(text)
+		if u.onPreview != nil && time.Since(u.lastPreviewAt) >= previewInterval {
+			u.lastPreviewAt = time.Now()
+			if raw := u.deltaBuf.String(); strings.TrimSpace(raw) != "" {
+				u.onPreview(renderMarkdown(raw, u.Width))
+			}
+		}
 		return
 	}
 	fmt.Fprint(u.Out, text)
@@ -77,6 +92,7 @@ func (u *UI) Delta(text string) {
 func (u *UI) EndTurn() {
 	raw := u.deltaBuf.String()
 	u.deltaBuf.Reset()
+	u.lastPreviewAt = time.Time{}
 	if u.onDeltaDone == nil {
 		return // plain mode already streamed the raw text to u.Out
 	}

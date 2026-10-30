@@ -52,6 +52,7 @@ type (
 	}
 	clearQuitMsg struct{}
 	deltaMsg     string // a raw chunk of the model's reply, shown live
+	previewMsg   string // the reply so far, re-rendered as markdown mid-stream
 	deltaDoneMsg string // the reply rendered as markdown ("" if nothing streamed)
 )
 
@@ -148,6 +149,7 @@ func (a *App) runTUI(cmd *cobra.Command, cfg *config.Config, sess *session.Sessi
 	}
 	ui.onStatus = func(s string) { prog.Send(statusMsg(s)) }
 	ui.onDelta = func(s string) { prog.Send(deltaMsg(s)) }
+	ui.onPreview = func(s string) { prog.Send(previewMsg(s)) }
 	ui.onDeltaDone = func(s string) { prog.Send(deltaDoneMsg(s)) }
 	m.build = func() tea.Msg {
 		rt, err := newRuntime(cfg, ui, sess)
@@ -266,6 +268,12 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case deltaMsg:
 		m.streaming += string(msg)
+		m.layout()
+		m.refresh(false)
+		return m, nil
+
+	case previewMsg:
+		m.streaming = string(msg) // replaces the raw tail with a rendered snapshot
 		m.layout()
 		m.refresh(false)
 		return m, nil
