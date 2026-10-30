@@ -107,6 +107,12 @@ func markdownStyle() ansi.StyleConfig {
 	s.H4 = ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{
 		Color: strp("250"), Bold: boolp(true), Italic: boolp(true), BlockSuffix: "\n",
 	}}
+	s.H5 = ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{
+		Color: strp("250"), Italic: boolp(true), BlockSuffix: "\n",
+	}}
+	s.H6 = ansi.StyleBlock{StylePrimitive: ansi.StylePrimitive{
+		Color: strp("244"), Italic: boolp(true), BlockSuffix: "\n",
+	}}
 
 	s.Item = ansi.StylePrimitive{BlockPrefix: "", Prefix: "• ", Color: strp(accentHex)}
 	s.Enumeration = ansi.StylePrimitive{BlockPrefix: "", Prefix: ". ", Color: strp(accentHex)}
