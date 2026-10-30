@@ -51,6 +51,8 @@ type (
 		reply chan executor.ApprovalResponse
 	}
 	clearQuitMsg struct{}
+	deltaMsg     string // a raw chunk of the model's reply, shown live
+	deltaDoneMsg string // the reply rendered as markdown ("" if nothing streamed)
 )
 
 type tuiWriter struct{ p *tea.Program }
@@ -101,6 +103,7 @@ type tuiModel struct {
 	spin spinner.Model
 
 	transcript string // raw text with ANSI codes, wrapped at render time
+	streaming  string // the current reply's raw text, live while it streams in
 	w, h       int
 	mode       tuiMode
 
@@ -144,6 +147,8 @@ func (a *App) runTUI(cmd *cobra.Command, cfg *config.Config, sess *session.Sessi
 		}
 	}
 	ui.onStatus = func(s string) { prog.Send(statusMsg(s)) }
+	ui.onDelta = func(s string) { prog.Send(deltaMsg(s)) }
+	ui.onDeltaDone = func(s string) { prog.Send(deltaDoneMsg(s)) }
 	m.build = func() tea.Msg {
 		rt, err := newRuntime(cfg, ui, sess)
 		return rtReadyMsg{rt, err}
@@ -246,6 +251,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
+		m.ui.Width = max(m.w-4, 20)
 		m.layout()
 		m.refresh(false)
 		return m, nil
@@ -256,6 +262,21 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case statusMsg:
 		m.activity = string(msg)
+		return m, nil
+
+	case deltaMsg:
+		m.streaming += string(msg)
+		m.layout()
+		m.refresh(false)
+		return m, nil
+
+	case deltaDoneMsg:
+		m.streaming = ""
+		if string(msg) != "" {
+			m.transcript += string(msg)
+		}
+		m.layout()
+		m.refresh(false)
 		return m, nil
 
 	case rtReadyMsg:
@@ -279,6 +300,10 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tokensIn += msg.res.Usage.InputTokens
 		m.tokensOu += msg.res.Usage.OutputTokens
 		m.approval = nil
+		if m.streaming != "" { // the task ended (error/cancel) before EndTurn rendered it
+			m.transcript += m.streaming
+			m.streaming = ""
+		}
 		m.layout()
 		m.refresh(false)
 		return m, nil
@@ -607,7 +632,7 @@ func (m *tuiModel) refresh(forceBottom bool) {
 		return
 	}
 	atBottom := m.vp.AtBottom() || forceBottom
-	m.vp.SetContent(ansi.Wrap(m.transcript, max(m.w-1, 10), " "))
+	m.vp.SetContent(ansi.Wrap(m.transcript+m.streaming, max(m.w-1, 10), " "))
 	if atBottom {
 		m.vp.GotoBottom()
 	}

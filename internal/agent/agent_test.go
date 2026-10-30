@@ -31,6 +31,7 @@ type rig struct {
 type reporter struct{ r *rig }
 
 func (p reporter) Delta(s string)               { p.r.logs = append(p.r.logs, "delta:"+s) }
+func (p reporter) EndTurn()                     {}
 func (p reporter) Plan(s []task.Step, h string) {}
 func (p reporter) ToolStart(s string)           { p.r.logs = append(p.r.logs, "start:"+s) }
 func (p reporter) ToolEnd(o executor.Outcome)   { p.r.logs = append(p.r.logs, "end:"+o.Call.Name) }

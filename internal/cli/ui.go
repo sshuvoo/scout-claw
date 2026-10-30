@@ -41,9 +41,16 @@ type UI struct {
 	Redactor    *redact.Redactor
 	Verbose     bool
 
+	// Width is the terminal width to wrap rendered markdown to. 0 uses a default.
+	Width int
+
 	// Optional hooks used by the full-screen chat UI.
-	approveFn func(context.Context, executor.ApprovalRequest) (executor.ApprovalResponse, error)
-	onStatus  func(string) // current activity, "" when idle
+	approveFn   func(context.Context, executor.ApprovalRequest) (executor.ApprovalResponse, error)
+	onStatus    func(string) // current activity, "" when idle
+	onDelta     func(string) // a streamed chunk, shown live before markdown rendering
+	onDeltaDone func(string) // the turn's text, rendered as markdown ("" if there was none)
+
+	deltaBuf strings.Builder
 }
 
 func (u *UI) c(code, s string) string {
@@ -53,11 +60,31 @@ func (u *UI) c(code, s string) string {
 	return code + s + cReset
 }
 
-// Delta writes a chunk of the model's output text as it streams in. Plain, no
-// styling: at this point we don't yet know whether the text is a thought
-// before a tool call or the final answer, so it can't be colored by role.
+// Delta writes a chunk of the model's output text as it streams in, raw and
+// unstyled (markdown is only valid once the whole block has arrived).
 func (u *UI) Delta(text string) {
+	u.deltaBuf.WriteString(text)
+	if u.onDelta != nil {
+		u.onDelta(text)
+		return
+	}
 	fmt.Fprint(u.Out, text)
+}
+
+// EndTurn closes out the text accumulated since the last EndTurn and, when
+// onDeltaDone is wired up (the full-screen chat UI), hands back that text
+// rendered as markdown so the live raw preview can be swapped for it.
+func (u *UI) EndTurn() {
+	raw := u.deltaBuf.String()
+	u.deltaBuf.Reset()
+	if u.onDeltaDone == nil {
+		return // plain mode already streamed the raw text to u.Out
+	}
+	rendered := ""
+	if strings.TrimSpace(raw) != "" {
+		rendered = renderMarkdown(raw, u.Width)
+	}
+	u.onDeltaDone(rendered)
 }
 
 func (u *UI) Plan(steps []task.Step, hypothesis string) {

@@ -32,6 +32,7 @@ const (
 // Reporter receives progress for display. All methods must be cheap and non-blocking.
 type Reporter interface {
 	Delta(text string) // a chunk of the model's output text, as it streams in
+	EndTurn()           // the model's output text for the current turn is complete
 	Plan(steps []task.Step, hypothesis string)
 	ToolStart(summary string)
 	ToolEnd(o executor.Outcome)
@@ -41,6 +42,7 @@ type Reporter interface {
 type nopReporter struct{}
 
 func (nopReporter) Delta(string)             {}
+func (nopReporter) EndTurn()                 {}
 func (nopReporter) Plan([]task.Step, string) {}
 func (nopReporter) ToolStart(string)         {}
 func (nopReporter) ToolEnd(executor.Outcome) {}
@@ -142,6 +144,7 @@ func (a *Agent) loop(ctx context.Context, prompt string, rep Reporter) (res Resu
 		pending = nil
 		res.Usage.InputTokens += resp.Usage.InputTokens
 		res.Usage.OutputTokens += resp.Usage.OutputTokens
+		rep.EndTurn()
 
 		if len(resp.ToolCalls) == 0 {
 			switch {
@@ -169,9 +172,6 @@ func (a *Agent) loop(ctx context.Context, prompt string, rep Reporter) (res Resu
 			return res
 		}
 
-		if strings.TrimSpace(resp.Text) != "" {
-			rep.Delta("\n") // the thought itself already streamed in via Delta
-		}
 		var outputs []llm.ToolOutput
 		pending = unanswered(resp.ToolCalls, outputs)
 		for _, tc := range resp.ToolCalls {
@@ -208,7 +208,7 @@ func (a *Agent) loop(ctx context.Context, prompt string, rep Reporter) (res Resu
 		req = llm.Request{Instructions: SystemPrompt, ToolOutputs: outputs, Tools: a.specs(), PreviousID: a.PreviousID, OnDelta: rep.Delta}
 		if consecFail >= a.Limits.MaxConsecutiveFails {
 			res.Status = StatusStuck
-			res = a.wrapUp(ctx, res, &req, fmt.Sprintf("%d tool calls in a row failed", consecFail))
+			res = a.wrapUp(ctx, res, &req, fmt.Sprintf("%d tool calls in a row failed", consecFail), rep)
 			if res.Text != "" {
 				pending = nil // delivered with the wrap-up request
 			}
@@ -216,7 +216,7 @@ func (a *Agent) loop(ctx context.Context, prompt string, rep Reporter) (res Resu
 		}
 	}
 	res.Status = StatusLimit
-	res = a.wrapUp(ctx, res, &req, fmt.Sprintf("the step limit (%d) was reached", a.Limits.MaxSteps))
+	res = a.wrapUp(ctx, res, &req, fmt.Sprintf("the step limit (%d) was reached", a.Limits.MaxSteps), rep)
 	if res.Text != "" {
 		pending = nil
 	}
@@ -258,7 +258,7 @@ func (a *Agent) failed(ctx context.Context, res Result, err error) Result {
 
 // wrapUp asks the model, without tools, for an honest status report after a
 // budget was exhausted. Failure of this call is not fatal.
-func (a *Agent) wrapUp(ctx context.Context, res Result, req *llm.Request, why string) Result {
+func (a *Agent) wrapUp(ctx context.Context, res Result, req *llm.Request, why string, rep Reporter) Result {
 	if ctx.Err() != nil {
 		return a.ended(ctx, res)
 	}
@@ -269,6 +269,7 @@ func (a *Agent) wrapUp(ctx context.Context, res Result, req *llm.Request, why st
 		res.Err = fmt.Errorf("%s; wrap-up request also failed: %w", why, err)
 		return res
 	}
+	rep.EndTurn()
 	a.PreviousID = resp.ID
 	res.Usage.InputTokens += resp.Usage.InputTokens
 	res.Usage.OutputTokens += resp.Usage.OutputTokens
