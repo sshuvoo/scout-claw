@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"scoutclaw/internal/pathglob"
 	"sort"
 	"strings"
 	"sync"
@@ -80,7 +81,7 @@ func (f FS) searchTools() []tools.Tool {
 				if strings.TrimSpace(a.Pattern) == "" {
 					return errors.New("pattern is required")
 				}
-				if _, err := compilePathGlob(a.Pattern); err != nil {
+				if _, err := pathglob.Compile(a.Pattern); err != nil {
 					return fmt.Errorf("bad pattern: %v", err)
 				}
 				if a.Path == "" {
@@ -138,7 +139,7 @@ func validateGrep(a *grepArgs) error {
 		return fmt.Errorf("bad pattern: %v", err)
 	}
 	if a.Glob != "" {
-		if _, err := compilePathGlob(a.Glob); err != nil {
+		if _, err := pathglob.Compile(a.Glob); err != nil {
 			return fmt.Errorf("bad glob: %v", err)
 		}
 	}
@@ -230,7 +231,7 @@ func walkFiles(ctx context.Context, root string, fn func(abs, rel string, d fs.D
 
 func (f FS) glob(ctx context.Context, a globArgs) (tools.Result, error) {
 	root := f.resolve(a.Path)
-	g, _ := compilePathGlob(a.Pattern)
+	g, _ := pathglob.Compile(a.Pattern)
 	limit := clampLimit(a.MaxResults, 200, 1000)
 	type hit struct {
 		path string
@@ -238,7 +239,7 @@ func (f FS) glob(ctx context.Context, a globArgs) (tools.Result, error) {
 	}
 	var hits []hit
 	err := walkFiles(ctx, root, func(abs, rel string, d fs.DirEntry) error {
-		if !g.match(rel) {
+		if !g.Match(rel) {
 			return nil
 		}
 		var mod time.Time
@@ -284,19 +285,19 @@ type grepFileResult struct {
 func (f FS) grep(ctx context.Context, a grepArgs) (tools.Result, error) {
 	root := f.resolve(a.Path)
 	re, _ := grepRegex(a)
-	var nameGlobs []pathGlob
+	var nameGlobs []pathglob.Glob
 	if a.Glob != "" {
-		g, _ := compilePathGlob(a.Glob)
+		g, _ := pathglob.Compile(a.Glob)
 		nameGlobs = append(nameGlobs, g)
 	}
-	var typeGlobs []pathGlob
+	var typeGlobs []pathglob.Glob
 	for _, t := range fileTypes[a.Type] {
-		g, _ := compilePathGlob(t)
+		g, _ := pathglob.Compile(t)
 		typeGlobs = append(typeGlobs, g)
 	}
 	var files []string
 	err := walkFiles(ctx, root, func(abs, rel string, d fs.DirEntry) error {
-		if len(nameGlobs) > 0 && !nameGlobs[0].match(rel) {
+		if len(nameGlobs) > 0 && !nameGlobs[0].Match(rel) {
 			return nil
 		}
 		if len(typeGlobs) > 0 && !anyMatch(typeGlobs, rel) {
@@ -382,9 +383,9 @@ func (f FS) grep(ctx context.Context, a grepArgs) (tools.Result, error) {
 	return tools.Result{Output: b.String(), Truncated: truncated}, nil
 }
 
-func anyMatch(globs []pathGlob, rel string) bool {
+func anyMatch(globs []pathglob.Glob, rel string) bool {
 	for _, g := range globs {
-		if g.match(rel) {
+		if g.Match(rel) {
 			return true
 		}
 	}

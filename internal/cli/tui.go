@@ -376,6 +376,10 @@ func (m *tuiModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "a":
 			d := m.approval.req.Decision
 			m.answer(executor.ApprovalResponse{Approved: true, Remember: d.Risk == policy.Medium && d.Key != ""}, "approved")
+		case "p":
+			if m.approval.req.SuggestedRule != "" {
+				m.answer(executor.ApprovalResponse{Approved: true, Persist: true}, "approved; saved "+m.approval.req.SuggestedRule)
+			}
 		case "n", "esc":
 			m.answer(executor.ApprovalResponse{}, "declined")
 		case "ctrl+c":
@@ -733,6 +737,9 @@ func (m *tuiModel) inputBox() string {
 		opts := "[y] approve   [n] decline"
 		if d.Risk == policy.Medium && d.Key != "" {
 			opts += "   [a] always this session"
+		}
+		if r := m.approval.req.SuggestedRule; r != "" {
+			opts += "   [p] always in project (" + r + ")"
 		}
 		line := lipgloss.NewStyle().Bold(true).Foreground(col).Render(strings.ToUpper(d.Risk.String())+" RISK") +
 			"  " + ansi.Truncate(m.ui.Redactor.Redact(m.approval.req.Summary), max(m.w-24, 10), "…") + "\n" + dimSt.Render(opts+"   (Esc = decline)")

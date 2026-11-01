@@ -78,7 +78,11 @@ func newRuntime(cfg *config.Config, ui *UI, sess *session.Session) (*Runtime, er
 		sess = session.New(cfg.SessionsDir(), cfg.Workspace, cfg.Model)
 	}
 	plat := platform.Detect()
-	scope := policy.NewScope(cfg.Workspace)
+	scope := policy.NewScope(cfg.Workspace, cfg.ExtraDirs...)
+	rules, err := buildRules(cfg)
+	if err != nil {
+		return nil, err
+	}
 	tracker := &verify.Tracker{}
 	opts := builtin.Options{
 		Scope: scope, BackupDir: cfg.BackupsDir(), TrashDir: cfg.TrashDir(), Files: filesystem.NewState(cfg.JournalPath(sess.ID)),
@@ -88,9 +92,12 @@ func newRuntime(cfg *config.Config, ui *UI, sess *session.Session) (*Runtime, er
 	}
 	opts.Background = &shell.Background{Runner: builtin.Runner(opts)}
 	reg, state := builtin.New(opts)
+	engine := policy.New(scope, cfg.Approval)
+	engine.Rules = rules
 	exec := &executor.Executor{
-		Registry: reg, Policy: policy.New(scope, cfg.Approval), Approver: ui, Audit: lg, Redactor: red,
+		Registry: reg, Policy: engine, Approver: ui, Audit: lg, Redactor: red,
 		Tracker: tracker, SessionID: sess.ID, ToolTimeout: cfg.ToolTimeout, MaxOutput: cfg.MaxOutput,
+		PersistRule: func(rule string) error { return persistRule(cfg, engine, rule) },
 	}
 	ag := &agent.Agent{
 		LLM: provider, Exec: exec, Registry: reg, State: state, Audit: lg, Reporter: ui, SessionID: sess.ID,
@@ -107,6 +114,44 @@ func newRuntime(cfg *config.Config, ui *UI, sess *session.Session) (*Runtime, er
 		}
 	}
 	return &Runtime{Cfg: cfg, UI: ui, Agent: ag, Session: sess, Files: builtin.FS(opts), Procs: opts.Background, audit: lg}, nil
+}
+
+// buildRules parses the permission rules of all config files. Rules from the
+// global and personal files may allow high-risk actions; shared project
+// rules may not.
+func buildRules(cfg *config.Config) (policy.RuleSet, error) {
+	rs := policy.RuleSet{Base: cfg.ProjectRoot}
+	for _, spec := range cfg.Rules {
+		action, err := policy.ParseRuleAction(spec.Action)
+		if err != nil {
+			return rs, fmt.Errorf("%s: %v", spec.Path, err)
+		}
+		r, err := policy.ParseRule(spec.Text, action, spec.Path, spec.Layer != config.LayerProject)
+		if err != nil {
+			return rs, fmt.Errorf("%s: %v", spec.Path, err)
+		}
+		rs.Add(r)
+	}
+	return rs, nil
+}
+
+// persistRule saves an allow rule in the project's personal config file and
+// applies it to the running session.
+func persistRule(cfg *config.Config, engine *policy.Engine, rule string) error {
+	path, err := cfg.LayerPath(config.LayerLocal)
+	if err != nil {
+		return err
+	}
+	r, err := policy.ParseRule(rule, policy.RuleAllow, path, true)
+	if err != nil {
+		return err
+	}
+	if _, err := config.AddRule(path, "allow", rule); err != nil {
+		return err
+	}
+	engine.Rules.Add(r)
+	cfg.Rules = append(cfg.Rules, config.RuleSpec{Action: "allow", Text: rule, Layer: config.LayerLocal, Path: path})
+	return nil
 }
 
 // syncSession copies the agent's conversation pointer into the session so a

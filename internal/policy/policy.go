@@ -43,18 +43,44 @@ type Decision struct {
 	Key       string // stable key for "allow for this session" (medium risk only)
 	Outside   bool   // touches paths outside the workspace
 	Deletes   bool   // removes files; the "edits" approval mode never auto-approves this
+	Rule      string // the config rule that decided the action, if any
 }
 
 type Engine struct {
 	Scope Scope
 	Mode  config.Approval
+	Rules RuleSet // permission rules from config files
 }
 
 func New(scope Scope, mode config.Approval) *Engine { return &Engine{Scope: scope, Mode: mode} }
 
-// Decide classifies the call and applies the approval mode.
+// Decide classifies the call, applies permission rules and then the approval
+// mode. Order: built-in refusals, deny rules, ask rules, allow rules, mode.
 func (e *Engine) Decide(tool string, input json.RawMessage) Decision {
 	d := e.Classify(tool, input)
+	if d.Forbidden {
+		d.Action = Deny
+		return d
+	}
+	if r, ok := e.Rules.match(RuleDeny, tool, input, e.Scope); ok {
+		d.Action, d.Rule = Deny, r.Describe()
+		d.Reason = "denied by rule " + r.Describe()
+		return d
+	}
+	if r, ok := e.Rules.match(RuleAsk, tool, input, e.Scope); ok {
+		d.Rule = r.Describe()
+		if e.Mode == config.ApprovalReadOnly && d.Risk != Low {
+			d.Action, d.Reason = Deny, "approval policy is readonly; "+d.Reason
+		} else {
+			d.Action = Ask
+			d.Key = "" // an ask rule means: ask every time
+		}
+		return d
+	}
+	if r, ok := e.Rules.match(RuleAllow, tool, input, e.Scope); ok && e.Mode != config.ApprovalReadOnly && (d.Risk != High || r.Personal) {
+		d.Action, d.Rule = Allow, r.Describe()
+		return d
+	}
 	switch {
 	case d.Forbidden:
 		d.Action = Deny

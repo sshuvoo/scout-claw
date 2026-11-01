@@ -14,6 +14,9 @@ func clearEnv(t *testing.T) {
 		t.Setenv(k, "")
 	}
 	t.Setenv(EnvStateDir, t.TempDir())
+	t.Setenv(EnvConfigDir, t.TempDir()) // never read the developer's ~/.scout
+	ws := t.TempDir()
+	t.Setenv(EnvWorkspace, ws)
 }
 
 func TestDefaults(t *testing.T) {

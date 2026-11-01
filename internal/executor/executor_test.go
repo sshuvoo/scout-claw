@@ -304,3 +304,29 @@ func TestSummarizeFileTools(t *testing.T) {
 		}
 	}
 }
+
+func TestPersistApprovalSavesSuggestedRule(t *testing.T) {
+	var saved []string
+	e := newEnv(t, config.ApprovalAsk, ApprovalResponse{Approved: true, Persist: true})
+	e.x.PersistRule = func(rule string) error { saved = append(saved, rule); return nil }
+	o := e.x.Run(context.Background(), call("fs_write", map[string]any{"path": "a.txt", "content": "x"}))
+	if !o.OK() || len(e.ap.asked) != 1 || e.ap.asked[0].SuggestedRule != "fs_write" {
+		t.Fatalf("outcome %+v, asked %+v", o, e.ap.asked)
+	}
+	if len(saved) != 1 || saved[0] != "fs_write" {
+		t.Fatalf("saved = %v", saved)
+	}
+}
+
+func TestNoSuggestedRuleWithoutPersistenceOrForHighRisk(t *testing.T) {
+	e := newEnv(t, config.ApprovalAsk, ApprovalResponse{}, ApprovalResponse{})
+	e.x.Run(context.Background(), call("fs_write", map[string]any{"path": "a.txt", "content": "x"}))
+	if e.ap.asked[0].SuggestedRule != "" {
+		t.Fatal("no PersistRule callback: nothing should be offered")
+	}
+	e.x.PersistRule = func(string) error { t.Fatal("must not persist"); return nil }
+	e.x.Run(context.Background(), call("fs_write", map[string]any{"path": filepath.Join(t.TempDir(), "o.txt"), "content": "x"}))
+	if e.ap.asked[1].SuggestedRule != "" {
+		t.Fatal("high-risk actions must not offer an always-allow rule")
+	}
+}

@@ -35,15 +35,18 @@ func (a *App) versionCmd() *cobra.Command {
 }
 
 func (a *App) configCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "config",
 		Short: "Show the effective configuration and where each value comes from",
 		Long: `Show the effective configuration. Precedence (highest first):
   1. command-line flags (--model, --approval, --max-steps, --workspace)
   2. environment variables
-  3. .env files: ./.env, ~/.scoutclaw.env, ~/.scout.env, ~/.env (never override real environment variables)
-  4. built-in defaults
-Secrets are never printed.`,
+  3. .scout/config.local.json   personal project settings (git-ignored)
+  4. .scout/config.json         shared project settings (loosening ones only once trusted)
+  5. ~/.scout/config.json       your settings for every project
+  6. .env files: ./.env, ~/.scoutclaw.env, ~/.scout.env, ~/.env
+  7. built-in defaults
+Secrets are never printed, and API keys are never read from config files.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := a.loadConfig(cmd)
@@ -54,6 +57,8 @@ Secrets are never printed.`,
 			return nil
 		},
 	}
+	a.configSubcommands(cmd)
+	return cmd
 }
 
 func (a *App) statusCmd() *cobra.Command {
@@ -319,7 +324,15 @@ func apiHost(base string) (host, port string) {
 }
 
 func (a *App) printConfig(cfg *config.Config, out io.Writer) {
-	row := func(k, v, env string) { fmt.Fprintf(out, "%-14s %-44s %s\n", k, v, env) }
+	keys := map[string]string{"base url": "baseUrl", "model": "model", "approval": "approval", "max steps": "maxSteps",
+		"tool timeout": "toolTimeout", "task timeout": "taskTimeout", "max output": "maxOutput", "max read": "maxRead", "compact at": "compactAt"}
+	row := func(k, v, env string) {
+		src := ""
+		if key, ok := keys[k]; ok {
+			src = "  [" + configSourceLabel(cfg, cfg.Sources[key]) + "]"
+		}
+		fmt.Fprintf(out, "%-14s %-44s %s%s\n", k, v, env, src)
+	}
 	row("api key", cfg.MaskedKey(), config.EnvAPIKey)
 	row("base url", orStr(cfg.BaseURL, "(provider default)"), config.EnvBaseURL)
 	row("model", cfg.Model, config.EnvModel)
@@ -332,6 +345,13 @@ func (a *App) printConfig(cfg *config.Config, out io.Writer) {
 	row("max output", fmt.Sprintf("%d bytes", cfg.MaxOutput), config.EnvMaxOutput)
 	row("max read", fmt.Sprintf("%d bytes", cfg.MaxRead), config.EnvMaxRead)
 	row("compact at", compactLabel(cfg.CompactAt), config.EnvCompactAt)
+	fmt.Fprintf(out, "%-14s %s\n", "project", cfg.ProjectRoot)
+	if len(cfg.Rules) > 0 {
+		fmt.Fprintf(out, "%-14s %d (scout permissions lists them)\n", "rules", len(cfg.Rules))
+	}
+	if t := cfg.Trust; t.Needed() {
+		fmt.Fprintf(out, "%-14s %s is not trusted; %d loosening setting(s) ignored (scout trust)\n", "trust", configSourceLabel(cfg, t.SharedPath), len(t.Loosening))
+	}
 }
 
 const repo = "sshuvoo/scout-claw"

@@ -77,7 +77,37 @@ Full guide, including PATH setup, upgrading from the first version, updating, un
 
 ## Configure
 
-Precedence: **flags > environment variables > `.env` files > defaults**. `.env` files are read from `./.env`, `~/.scoutclaw.env`, `~/.scout.env`, `~/.env` (unchanged from before) and never override variables that are already set. Copy `.env.example` and fill in the key; real `.env` files are git-ignored.
+Precedence: **flags > environment variables > `.scout/config.local.json` > `.scout/config.json` > `~/.scout/config.json` > `.env` files > defaults**. `.env` files are read from `./.env`, `~/.scoutclaw.env`, `~/.scout.env`, `~/.env` (unchanged from before) and never override variables that are already set. Copy `.env.example` and fill in the key; real `.env` files are git-ignored. `scout config` shows every value with the file or variable it came from.
+
+### Config files and permissions
+
+| File | Scope | Commit it? |
+|---|---|---|
+| `~/.scout/config.json` | you, every project (`SCOUT_CONFIG_DIR` moves the folder) | – |
+| `.scout/config.json` | the project, shared with the team | yes |
+| `.scout/config.local.json` | you, this project (git-ignored via `.scout/.gitignore`) | no |
+
+The project is the nearest folder at or above the workspace that has a `.scout/` directory (`scout init` creates one); the workspace itself does not change. Keys are the camelCase names of the settings above (`model`, `approval`, `maxSteps`, `toolTimeout`, `taskTimeout`, `maxOutput`, `maxRead`, `compactAt`; `baseUrl` only in the global file), plus `permissions` and `instructions`. API keys are never read from config files. A JSON Schema for editor autocomplete is in [`schema/config.schema.json`](schema/config.schema.json).
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/sshuvoo/scout-claw/main/schema/config.schema.json",
+  "approval": "edits",
+  "permissions": {
+    "allow": ["shell_exec(go test *)", "fs_write(src/**)"],
+    "ask":   ["shell_exec(git push *)"],
+    "deny":  ["fs_read(**/.env*)", "fs_delete(migrations/**)"],
+    "additionalDirectories": ["../shared-lib"]
+  },
+  "instructions": ["docs/CONTRIBUTING.md"]
+}
+```
+
+**Rules** are `Tool` or `Tool(spec)`: file tools take a path glob relative to the project (`src/**`, `**/.env*`, or an absolute/`~/` path), `shell_exec`/`proc_start` take a command where a trailing ` *` allows further arguments, `net_*` take `domain:host`. They are checked after the built-in refusals and before the approval mode: **deny** wins, then **ask** (asks even in `auto`), then **allow**. An allow rule must match every path an action touches. `shell_script`/`shell_powershell` can be denied or asked about but never allowed, and rules from the shared project file never allow high-risk actions. Manage rules with `scout permissions [add|remove]`, settings with `scout config get|set|unset [--global|--project|--local]`; in chat, `/permissions` lists them. When an approval prompt offers **`[p] always in this project`**, ScoutClaw saves the narrow rule it shows (for example `shell_exec(go test *)`) to `.scout/config.local.json`.
+
+**Trust.** A cloned repository could ship a `.scout/config.json` that loosens checks. Its loosening settings (allow rules, `approval: auto`/`edits`, `additionalDirectories`, `instructions`) apply only after you trust it: ScoutClaw lists them and asks once, records your answer in `~/.scout/trusted.json` together with a hash of the file, and asks again if the file changes. Without a terminal they are ignored unless you pass `--trust-workspace` for that run. Tightening settings (deny and ask rules, `readonly`) always apply. `scout trust [--revoke]` manages it explicitly.
+
+**Instructions.** `~/.scout/SCOUT.md`, then `AGENTS.md` and `SCOUT.md` at the project root (and at the workspace, if it is a subfolder), then files listed in `instructions` are added to the first message of each session (32 KiB in total). They guide conventions and workflow; they cannot override your request, the policy or approvals.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -115,7 +145,10 @@ scout run --resume last "Now also check the logs"            # continue a sessio
 | `setup` | Enter your API key once (hidden input); saved for all future runs. |
 | `doctor [--online]` | Checks config, state dir, optional tools, DNS/TCP to the API host; `--online` sends one tiny request to prove key and model work. |
 | `status` | Version, platform, limits, session counts, last session, audit log — no secrets. |
-| `config` | Effective configuration with the variable each value comes from. |
+| `config [get\|set\|unset]` | Effective configuration with the file or variable each value comes from; `set`/`unset` edit `--local` (default), `--project` or `--global` config files. |
+| `permissions [add\|remove]` | List permission rules with their source files, or add/remove one (`scout permissions add allow 'shell_exec(go test *)'`). |
+| `init` | Create `.scout/config.json` and `.scout/.gitignore` for the project. |
+| `trust [--revoke]` | Trust (or stop trusting) the project's shared `.scout/config.json`. |
 | `history [id]` | List sessions; with an id, show its tasks and every recorded action, policy decision and approval. |
 | `version` | Version information. |
 

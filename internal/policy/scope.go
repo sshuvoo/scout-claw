@@ -20,15 +20,22 @@ func foldCase(s string) string {
 
 // Scope defines the workspace and resolves paths against it.
 type Scope struct {
-	Root string // absolute, symlink-resolved
+	Root  string   // absolute, symlink-resolved
+	Extra []string // additional writable directories from config (permissions.additionalDirectories)
 }
 
-func NewScope(root string) Scope {
+func NewScope(root string, extra ...string) Scope {
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		abs = root
 	}
-	return Scope{Root: realPath(abs)}
+	s := Scope{Root: realPath(abs)}
+	for _, d := range extra {
+		if a, err := filepath.Abs(d); err == nil {
+			s.Extra = append(s.Extra, realPath(a))
+		}
+	}
+	return s
 }
 
 // Resolve turns p into an absolute, cleaned path. Relative paths are taken
@@ -86,13 +93,16 @@ func posixToWindows(p, volume string) string {
 
 func isASCIILetter(c byte) bool { return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' }
 
-// Contains reports whether the already-resolved absolute path is inside the workspace.
+// Contains reports whether the already-resolved absolute path is inside the
+// workspace or one of the additional directories.
 func (s Scope) Contains(abs string) bool {
-	rel, err := filepath.Rel(s.Root, abs)
-	if err != nil {
-		return false
+	for _, root := range append([]string{s.Root}, s.Extra...) {
+		rel, err := filepath.Rel(root, abs)
+		if err == nil && (rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))) {
+			return true
+		}
 	}
-	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+	return false
 }
 
 // realPath resolves symlinks on the longest existing prefix of p, so it works

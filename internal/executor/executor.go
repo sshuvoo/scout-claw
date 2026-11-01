@@ -26,11 +26,15 @@ type ApprovalRequest struct {
 	Summary  string
 	Decision policy.Decision
 	Preview  string // diff for file edits
+	// SuggestedRule is the permission rule that "always in this project"
+	// would save; empty when that choice is not offered.
+	SuggestedRule string
 }
 
 type ApprovalResponse struct {
 	Approved bool
 	Remember bool // allow the same kind of medium-risk action for the rest of the session
+	Persist  bool // save SuggestedRule as an allow rule in the project's personal config
 }
 
 type Approver interface {
@@ -71,6 +75,8 @@ type Executor struct {
 	SessionID   string
 	ToolTimeout time.Duration
 	MaxOutput   int
+	// PersistRule saves an allow rule for the project; nil disables "always in this project".
+	PersistRule func(rule string) error
 
 	mu       sync.Mutex
 	allowed  map[string]bool // session-level approvals keyed by policy key
@@ -112,7 +118,7 @@ func (x *Executor) Run(ctx context.Context, call Call) Outcome {
 	d := x.Policy.Decide(call.Name, call.Input)
 	out.Decision = d
 	x.Audit.Log(audit.Event{SessionID: x.SessionID, Kind: "decision", Tool: call.Name, Data: map[string]any{
-		"call_id": call.ID, "risk": d.Risk.String(), "action": d.Action.String(), "reason": d.Reason, "forbidden": d.Forbidden}})
+		"call_id": call.ID, "risk": d.Risk.String(), "action": d.Action.String(), "reason": d.Reason, "forbidden": d.Forbidden, "rule": d.Rule}})
 
 	grant := tools.Grant{}
 	switch d.Action {
@@ -123,6 +129,9 @@ func (x *Executor) Run(ctx context.Context, call Call) Outcome {
 			break
 		}
 		req := ApprovalRequest{Tool: call.Name, Summary: Summarize(call), Decision: d}
+		if x.PersistRule != nil {
+			req.SuggestedRule = policy.SuggestRule(call.Name, call.Input, d)
+		}
 		if pv, ok := tool.(tools.Previewer); ok {
 			if p, err := pv.Preview(ctx, call.Input); err == nil {
 				req.Preview = p
@@ -132,7 +141,8 @@ func (x *Executor) Run(ctx context.Context, call Call) Outcome {
 		}
 		resp, err := x.Approver.Approve(ctx, req)
 		x.Audit.Log(audit.Event{SessionID: x.SessionID, Kind: "approval", Tool: call.Name, Data: map[string]any{
-			"call_id": call.ID, "approved": resp.Approved && err == nil, "remember": resp.Remember, "summary": Summarize(call)}})
+			"call_id": call.ID, "approved": resp.Approved && err == nil, "remember": resp.Remember, "persist": resp.Persist && req.SuggestedRule != "",
+			"summary": Summarize(call)}})
 		if err != nil {
 			return fail(tools.KindCancelled, "approval prompt aborted: "+err.Error())
 		}
@@ -142,6 +152,11 @@ func (x *Executor) Run(ctx context.Context, call Call) Outcome {
 		out.Approved = true
 		if resp.Remember && d.Risk == policy.Medium && d.Key != "" {
 			x.remember(d.Key)
+		}
+		if resp.Persist && req.SuggestedRule != "" {
+			if err := x.PersistRule(req.SuggestedRule); err != nil {
+				x.Audit.Log(audit.Event{SessionID: x.SessionID, Kind: "persist_rule_failed", Tool: call.Name, Data: map[string]any{"rule": req.SuggestedRule, "error": err.Error()}})
+			}
 		}
 	}
 	grant.OutsideWorkspace = d.Outside && (out.Approved || d.Action == policy.Allow)

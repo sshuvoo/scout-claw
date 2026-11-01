@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/sshuvoo/scout-claw/main/schema/config.schema.json",
+  "title": "ScoutClaw configuration",
+  "description": "~/.scout/config.json (global), .scout/config.json (shared project) or .scout/config.local.json (personal project). API keys are never read from these files.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": { "type": "string" },
+    "model": { "type": "string", "minLength": 1, "description": "Model name, e.g. gpt-5.5." },
+    "baseUrl": { "type": "string", "description": "Alternative Responses API endpoint. Only read from the global file." },
+    "approval": { "enum": ["ask", "edits", "auto", "readonly"], "description": "ask: prompt for medium and high risk; edits: also run workspace file edits without asking; auto: run medium risk without asking; readonly: deny anything that is not low risk. auto and edits in a shared project file apply only once the project is trusted." },
+    "maxSteps": { "type": "integer", "minimum": 1, "maximum": 500, "description": "Model iterations per task." },
+    "toolTimeout": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?(ms|s|m|h)$", "description": "Per-command timeout, e.g. 2m." },
+    "taskTimeout": { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?(ms|s|m|h)$", "description": "Whole-task timeout, e.g. 30m." },
+    "maxOutput": { "type": "integer", "minimum": 1024, "maximum": 1048576, "description": "Bytes of tool output kept per call." },
+    "maxRead": { "type": "integer", "minimum": 4096, "maximum": 1048576, "description": "Bytes of file content fs_read may return per call." },
+    "compactAt": { "type": "integer", "minimum": 0, "description": "Conversation size in tokens at which the provider compacts earlier turns; 0 turns it off, otherwise at least 20000." },
+    "logLevel": { "type": "string" },
+    "instructions": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Extra instruction files (relative to the project root) added to the model's context. In a shared project file they apply only once the project is trusted."
+    },
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Rules: Tool or Tool(spec). fs_* take a path glob relative to the project root, shell_exec/proc_start a command (' *' = any further arguments), net_* domain:host. deny wins over ask, ask over allow.",
+      "properties": {
+        "allow": { "type": "array", "items": { "type": "string" }, "description": "Run without asking. In the shared project file: only once trusted, and never for high-risk actions." },
+        "ask": { "type": "array", "items": { "type": "string" }, "description": "Always ask, even in auto or edits mode." },
+        "deny": { "type": "array", "items": { "type": "string" }, "description": "Never run." },
+        "additionalDirectories": { "type": "array", "items": { "type": "string" }, "description": "Extra directories treated as part of the workspace (writable after approval)." }
+      }
+    }
+  }
+}

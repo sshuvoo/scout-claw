@@ -1,9 +1,10 @@
 // Package config loads ScoutClaw settings.
 //
-// Precedence (highest first): command-line flags, environment variables
-// (including values loaded from .env files), built-in defaults. .env files are
-// read in the legacy order (./.env, ~/.scoutclaw.env, ~/.scout.env, ~/.env) and
-// never override variables that are already set.
+// Precedence (highest first): command-line flags, environment variables,
+// <project>/.scout/config.local.json, <project>/.scout/config.json,
+// ~/.scout/config.json, .env files, built-in defaults. .env files are read in
+// the legacy order (./.env, ~/.scoutclaw.env, ~/.scout.env, ~/.env) and never
+// override variables that are already set.
 package config
 
 import (
@@ -11,7 +12,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -60,6 +60,21 @@ type Config struct {
 	MaxRead     int // bytes of file content fs_read may return
 	CompactAt   int // context size in tokens at which the provider compacts the conversation; 0 disables
 	LogLevel    string
+
+	ProjectRoot  string            // directory holding .scout/ (the workspace when there is none)
+	Sources      map[string]string // setting key -> where its value came from
+	Rules        []RuleSpec        // permission rules from all config files, lowest layer first
+	ExtraDirs    []string          // additional writable directories (permissions.additionalDirectories)
+	Instructions []string          // extra instruction files listed in config files
+	Trust        Trust             // state of the shared project config
+	Warnings     []string          // problems that did not stop loading
+}
+
+// Options adjust loading.
+type Options struct {
+	// TrustProject applies the shared project config fully for this run
+	// without recording trust (scout --trust-workspace).
+	TrustProject bool
 }
 
 // Env names. OPENAI_API_KEY and OPENAI_BASE_URL are the pre-existing conventions.
@@ -79,20 +94,24 @@ const (
 	EnvLogLevel    = "SCOUTCLAW_LOG_LEVEL"
 )
 
-// Load reads configuration from the environment. Call LoadDotEnv first.
-func Load() (*Config, error) {
+// Load reads configuration from defaults, .env files, config files and the
+// environment. Call LoadDotEnv first.
+func Load() (*Config, error) { return LoadWith(Options{}) }
+
+// LoadWith is Load with options.
+func LoadWith(o Options) (*Config, error) {
 	c := &Config{
 		APIKey:      os.Getenv(EnvAPIKey),
-		BaseURL:     os.Getenv(EnvBaseURL),
-		Model:       getenv(EnvModel, DefaultModel),
-		Approval:    Approval(getenv(EnvApproval, string(ApprovalAsk))),
+		Model:       DefaultModel,
+		Approval:    ApprovalAsk,
 		MaxSteps:    DefaultMaxSteps,
 		ToolTimeout: 2 * time.Minute,
 		TaskTimeout: 30 * time.Minute,
 		MaxOutput:   16 * 1024,
 		MaxRead:     64 * 1024,
 		CompactAt:   DefaultCompactAt,
-		LogLevel:    getenv(EnvLogLevel, "warn"),
+		LogLevel:    "warn",
+		Sources:     map[string]string{},
 	}
 	var err error
 	if c.Workspace, err = resolveWorkspace(os.Getenv(EnvWorkspace)); err != nil {
@@ -101,23 +120,32 @@ func Load() (*Config, error) {
 	if c.StateDir, err = resolveStateDir(os.Getenv(EnvStateDir)); err != nil {
 		return nil, err
 	}
-	if c.MaxSteps, err = envInt(EnvMaxSteps, c.MaxSteps); err != nil {
+	c.ProjectRoot = FindProjectRoot(c.Workspace)
+	settings := settingsFor(c)
+	for _, s := range settings {
+		c.Sources[s.key] = "default"
+	}
+	// .env values are the lowest layer above defaults ...
+	for _, s := range settings {
+		if file, ok := dotEnvKeys[s.env]; ok && strings.TrimSpace(os.Getenv(s.env)) != "" {
+			if err := s.apply(c, os.Getenv(s.env)); err != nil {
+				return nil, fmt.Errorf("%s (from %s): %v", s.env, file, err)
+			}
+			c.Sources[s.key] = file
+		}
+	}
+	// ... then config files ...
+	if err := c.loadFiles(o.TrustProject); err != nil {
 		return nil, err
 	}
-	if c.MaxOutput, err = envInt(EnvMaxOutput, c.MaxOutput); err != nil {
-		return nil, err
-	}
-	if c.MaxRead, err = envInt(EnvMaxRead, c.MaxRead); err != nil {
-		return nil, err
-	}
-	if c.CompactAt, err = envInt(EnvCompactAt, c.CompactAt); err != nil {
-		return nil, err
-	}
-	if c.ToolTimeout, err = envDuration(EnvToolTimeout, c.ToolTimeout); err != nil {
-		return nil, err
-	}
-	if c.TaskTimeout, err = envDuration(EnvTaskTimeout, c.TaskTimeout); err != nil {
-		return nil, err
+	// ... and real environment variables override them.
+	for _, s := range settings {
+		if c.envOverrides(s.env) {
+			if err := s.apply(c, os.Getenv(s.env)); err != nil {
+				return nil, fmt.Errorf("%s: %v", s.env, err)
+			}
+			c.Sources[s.key] = "env " + s.env
+		}
 	}
 	return c, c.Validate()
 }
@@ -127,6 +155,8 @@ func Load() (*Config, error) {
 func (c *Config) Validate() error {
 	switch c.Approval {
 	case ApprovalAsk, ApprovalEdits, ApprovalAuto, ApprovalReadOnly:
+	case "":
+		c.Approval = ApprovalAsk
 	default:
 		return fmt.Errorf("invalid approval policy %q (want ask, edits, auto or readonly)", c.Approval)
 	}
@@ -180,37 +210,6 @@ func (c *Config) MaskedKey() string {
 	}
 }
 
-func getenv(k, def string) string {
-	if v := strings.TrimSpace(os.Getenv(k)); v != "" {
-		return v
-	}
-	return def
-}
-
-func envInt(k string, def int) (int, error) {
-	v := strings.TrimSpace(os.Getenv(k))
-	if v == "" {
-		return def, nil
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return 0, fmt.Errorf("%s: %q is not an integer", k, v)
-	}
-	return n, nil
-}
-
-func envDuration(k string, def time.Duration) (time.Duration, error) {
-	v := strings.TrimSpace(os.Getenv(k))
-	if v == "" {
-		return def, nil
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil {
-		return 0, fmt.Errorf("%s: %q is not a duration (e.g. 90s, 5m)", k, v)
-	}
-	return d, nil
-}
-
 func resolveWorkspace(v string) (string, error) {
 	if v == "" {
 		wd, err := os.Getwd()
@@ -254,6 +253,10 @@ func LoadDotEnv() {
 	}
 }
 
+// dotEnvKeys records variables set from .env files (name -> file), which rank
+// below config files.
+var dotEnvKeys = map[string]string{}
+
 func parseEnvFile(path string) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -275,6 +278,7 @@ func parseEnvFile(path string) {
 		v = strings.Trim(strings.TrimSpace(v), `"'`)
 		if k != "" && os.Getenv(k) == "" {
 			_ = os.Setenv(k, v)
+			dotEnvKeys[k] = path
 		}
 	}
 }

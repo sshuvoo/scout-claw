@@ -45,6 +45,7 @@ var slashCommands = []struct{ name, desc string }{
 	{"/diff", "file changes made in this session"},
 	{"/undo", "undo the last file change (/undo 3 for more)"},
 	{"/procs", "background processes (/procs stop <id>)"},
+	{"/permissions", "permission rules and where they come from"},
 	{"/key", "enter or replace your API key"},
 	{"/config", "show effective configuration"},
 	{"/status", "session, limits and workspace"},
@@ -64,17 +65,21 @@ const helpText = `Type a task in plain language, or a slash command:
   /diff [path]          file changes ScoutClaw made in this session, with diffs
   /undo [n]             undo the last n file changes (default 1)
   /procs [stop <id>]    list background processes started by ScoutClaw, or stop one
+  /permissions          permission rules from your config files (edit with scout permissions)
   /key                  enter or replace your OpenAI API key (masked input)
   /history              recent sessions
   /doctor               quick local checks
   /clear                clear the screen
   /reset                start a new session (forget conversation context)
   /exit                 quit (also: exit, quit, q)
-Ctrl-C cancels a running task. Persistent settings: edit ~/.scoutclaw.env.`
+Ctrl-C cancels a running task. Persistent settings: scout config set (or ~/.scout/config.json); API key: ~/.scoutclaw.env.`
 
 func (a *App) chat(cmd *cobra.Command) error {
 	cfg, err := a.loadConfig(cmd)
 	if err != nil {
+		return err
+	}
+	if cfg, err = a.ensureTrust(cmd, cfg, a.newUI()); err != nil {
 		return err
 	}
 	sess, err := a.resumeSession(cfg)
@@ -230,6 +235,8 @@ func (a *App) slash(ctx context.Context, cfg *config.Config, ui *UI, rt *Runtime
 		if err != nil {
 			say("%s", ui.c(cRed, err.Error()))
 		}
+	case "/permissions":
+		printRules(out, cfg)
 	case "/procs":
 		if len(args) == 2 && strings.ToLower(args[0]) == "stop" {
 			in, _ := json.Marshal(map[string]string{"id": args[1]})

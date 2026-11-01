@@ -218,7 +218,7 @@ Config is re-read at the start of every chat task, so edits apply without a rest
 7. Change journal plus `fs_changes`, `fs_undo`, and `/diff` and `/undo`
 8. Policy cases, the `edits` approval mode, CODING section in the prompt, tests (including Windows paths and CRLF)
 
-**Phase 1.5: config and consent** (section 5; needed once edits are frequent)
+**Phase 1.5: config and consent** (section 5; needed once edits are frequent) — **implemented** with the recommended choices: `~/.scout/`, plain JSON plus JSON Schema, "always" saved per project. One deliberate change from 5.1: the workspace still defaults to the current directory; only config discovery walks up to the nearest `.scout/` (widening the writable area silently would be a safety regression). Managed (admin) config is still to do
 1. Layered config files, merging and source tracking, `scout config` with sources
 2. Permission rules in the policy engine, plus the audit record of the deciding rule
 3. Workspace trust prompt and trust store
