@@ -67,6 +67,8 @@ func TestRuleMatching(t *testing.T) {
 	ws, _ := filepath.EvalSymlinks(t.TempDir())
 	scope := NewScope(ws)
 	home, _ := os.UserHomeDir()
+	absDir, _ := filepath.EvalSymlinks(t.TempDir())
+	absPattern := "fs_write(" + filepath.ToSlash(absDir) + "/**)"
 	tests := []struct {
 		name   string
 		rule   string
@@ -83,7 +85,8 @@ func TestRuleMatching(t *testing.T) {
 		{"anchored path", "fs_write(src/**)", RuleAllow, "fs_write", map[string]any{"path": "src/a/b.go"}, true},
 		{"anchored path misses", "fs_write(src/**)", RuleAllow, "fs_write", map[string]any{"path": "test/b.go"}, false},
 		{"relative pattern never matches outside the project", "fs_write(**)", RuleAllow, "fs_write", map[string]any{"path": "../x.go"}, false},
-		{"absolute pattern", "fs_write(/tmp/scout-x/**)", RuleAsk, "fs_write", map[string]any{"path": "/tmp/scout-x/a"}, true},
+		{"absolute pattern", absPattern, RuleAsk, "fs_write", map[string]any{"path": filepath.Join(absDir, "a")}, true},
+		{"absolute pattern misses other dirs", absPattern, RuleAsk, "fs_write", map[string]any{"path": filepath.Join(ws, "a")}, false},
 		{"home pattern", "fs_read(~/notes/**)", RuleAllow, "fs_read", map[string]any{"path": filepath.Join(home, "notes", "a.md")}, true},
 		{"deny copy if either side matches", "fs_copy(secret/**)", RuleDeny, "fs_copy", map[string]any{"src": "secret/k", "dest": "pub/k"}, true},
 		{"allow copy only if both sides match", "fs_copy(pub/**)", RuleAllow, "fs_copy", map[string]any{"src": "secret/k", "dest": "pub/k"}, false},

@@ -66,6 +66,11 @@ func newRuntime(cfg *config.Config, ui *UI, sess *session.Session) (*Runtime, er
 	if err != nil {
 		return nil, err
 	}
+	// Parse rules before opening anything, so a bad rule leaks no file handles.
+	rules, err := buildRules(cfg)
+	if err != nil {
+		return nil, err
+	}
 	red := newRedactor(cfg)
 	ui.Redactor = red
 	lg, err := audit.Open(cfg.AuditPath(), red)
@@ -79,10 +84,6 @@ func newRuntime(cfg *config.Config, ui *UI, sess *session.Session) (*Runtime, er
 	}
 	plat := platform.Detect()
 	scope := policy.NewScope(cfg.Workspace, cfg.ExtraDirs...)
-	rules, err := buildRules(cfg)
-	if err != nil {
-		return nil, err
-	}
 	tracker := &verify.Tracker{}
 	opts := builtin.Options{
 		Scope: scope, BackupDir: cfg.BackupsDir(), TrashDir: cfg.TrashDir(), Files: filesystem.NewState(cfg.JournalPath(sess.ID)),

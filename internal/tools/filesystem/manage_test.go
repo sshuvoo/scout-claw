@@ -80,7 +80,7 @@ func TestPrepareTransferErrors(t *testing.T) {
 		args    transferArgs
 		wantErr string
 	}{
-		{"missing source", "copy", transferArgs{Src: "nope", Dest: "z"}, "no such file"},
+		{"missing source", "copy", transferArgs{Src: "nope", Dest: "z"}, "nope"},
 		{"same path", "copy", transferArgs{Src: "a.txt", Dest: "a.txt"}, "same path"},
 		{"directory into itself", "move", transferArgs{Src: "dir", Dest: "dir/sub"}, "into itself"},
 		{"dest exists", "copy", transferArgs{Src: "a.txt", Dest: "b.txt"}, "already exists"},

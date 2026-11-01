@@ -3,6 +3,7 @@ package filesystem
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -57,7 +58,7 @@ func TestLoadText(t *testing.T) {
 			if got.exists != tt.exists || got.text != tt.text || got.bom != tt.bom || got.crlf != tt.crlf {
 				t.Fatalf("got exists=%v text=%q bom=%v crlf=%v", got.exists, got.text, got.bom, got.crlf)
 			}
-			if tt.exists && got.mode != 0o640 && got.mode.Perm() != 0o640 && os.Getenv("GOOS") != "windows" {
+			if tt.exists && runtime.GOOS != "windows" && got.mode.Perm() != 0o640 { // Windows has no Unix modes
 				t.Errorf("mode = %v", got.mode)
 			}
 			if tt.roundRaw && got.encode(got.text) != got.raw {

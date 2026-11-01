@@ -213,7 +213,7 @@ func TestManageAndUndo(t *testing.T) {
 	}
 
 	rep := must("fs_changes", map[string]any{}).Output
-	for _, want := range []string{"mkdir", "copy", "move", "patch", "delete", "src/pkg/a.go (+1 -0)"} {
+	for _, want := range []string{"mkdir", "copy", "move", "patch", "delete", filepath.Join("src", "pkg", "a.go") + " (+1 -0)"} {
 		if !strings.Contains(rep, want) {
 			t.Fatalf("changes report missing %q:\n%s", want, rep)
 		}

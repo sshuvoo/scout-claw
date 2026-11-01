@@ -159,7 +159,7 @@ func TestUndoRefusals(t *testing.T) {
 				run(t, m["fs_write"], ctx0, map[string]any{"path": "n.txt", "content": "x"})
 				os.Remove(filepath.Join(ws, "n.txt"))
 			},
-			wantErr: "no such file",
+			wantErr: "n.txt",
 		},
 	}
 	for _, tt := range tests {

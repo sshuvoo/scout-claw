@@ -115,7 +115,7 @@ func TestApplyPatchChecks(t *testing.T) {
 		{"add over an existing file", "*** Begin Patch\n*** Add File: exists.txt\n+y\n*** End Patch", "already exists"},
 		{"update a missing file", "*** Begin Patch\n*** Update File: nope.txt\n-a\n+b\n*** End Patch", "does not exist"},
 		{"delete a directory", "*** Begin Patch\n*** Delete File: dir\n*** End Patch", "use fs_delete"},
-		{"delete a missing file", "*** Begin Patch\n*** Delete File: nope.txt\n*** End Patch", "no such file"},
+		{"delete a missing file", "*** Begin Patch\n*** Delete File: nope.txt\n*** End Patch", "nope.txt"},
 		{"write outside the workspace", "*** Begin Patch\n*** Add File: ../escape.txt\n+x\n*** End Patch", "outside the workspace"},
 	}
 	for _, tt := range tests {

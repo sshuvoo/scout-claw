@@ -30,7 +30,9 @@ type harness struct {
 
 func newHarness(t *testing.T, stdin string, steps ...func(llm.Request) (*llm.Response, error)) *harness {
 	ws := t.TempDir()
-	t.Setenv("HOME", t.TempDir()) // never read the developer's real ~/.scoutclaw.env
+	home := t.TempDir()
+	t.Setenv("HOME", home)        // never read the developer's real ~/.scoutclaw.env or ~/.scout
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
 	t.Setenv(config.EnvStateDir, t.TempDir())
 	t.Setenv(config.EnvWorkspace, ws)
 	t.Setenv(config.EnvAPIKey, "sk-test-key-not-real-0000000000")

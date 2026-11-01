@@ -1,6 +1,9 @@
 package pathglob
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
 func TestPathGlob(t *testing.T) {
 	tests := []struct {
@@ -26,8 +29,14 @@ func TestPathGlob(t *testing.T) {
 		{"*.{ts,tsx}", "x/app.tsx", true},
 		{"*.{ts,tsx}", "app.js", false},
 		{"a.b", "axb", false}, // regex metacharacters are literal
-		{`\*.md`, "*.md", true},
 		{"[unclosed", "[unclosed", true},
+	}
+	if runtime.GOOS != "windows" { // on Windows a backslash is a path separator, not an escape
+		tests = append(tests, struct {
+			glob string
+			path string
+			want bool
+		}{`\*.md`, "*.md", true})
 	}
 	for _, tt := range tests {
 		g, err := Compile(tt.glob)

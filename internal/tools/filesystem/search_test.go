@@ -101,7 +101,7 @@ func TestGrepOutputModesAndFilters(t *testing.T) {
 		excluded []string
 	}{
 		{"content with line numbers", map[string]any{"pattern": "TODO"},
-			[]string{"main.go:4: \tTODO()", "pkg/util.go:3: // TODO: tidy", "README.md:2: TODO list", "[4 match(es) in 4 file(s)]"},
+			[]string{"main.go:4: \tTODO()", "util.go:3: // TODO: tidy", "README.md:2: TODO list", "[4 match(es) in 4 file(s)]"},
 			[]string{"debug.log", "build/out.go", "node_modules", "server.key", "blob.bin"}},
 		{"files only", map[string]any{"pattern": "TODO", "output": "files"}, []string{"main.go\n", "web/app.ts\n"}, []string{":4:"}},
 		{"count", map[string]any{"pattern": "TODO|todo", "output": "count"}, []string{"web/app.ts: 1"}, nil},
