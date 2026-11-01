@@ -177,7 +177,7 @@ func (a *App) ensureTrust(cmd *cobra.Command, cfg *config.Config, ui *UI) (*conf
 		return cfg, nil
 	}
 	fmt.Fprint(a.Out, "Trust this project's settings? Only say yes if you trust the repository. [y/N]: ")
-	line, err := ui.In.ReadLine(cmd.Context())
+	line, err := a.readAnswer(cmd, ui)
 	if err != nil {
 		return nil, err
 	}
@@ -190,6 +190,32 @@ func (a *App) ensureTrust(cmd *cobra.Command, cfg *config.Config, ui *UI) (*conf
 	}
 	fmt.Fprintln(a.Out, ui.c(cGreen, "Trusted. ScoutClaw asks again if this file changes."))
 	return a.loadConfig(cmd)
+}
+
+// readAnswer reads one line for a prompt shown before the session starts. It
+// reads stdin directly, one byte at a time, so no reader is left running that
+// would compete with the full-screen UI for keystrokes afterwards.
+func (a *App) readAnswer(cmd *cobra.Command, ui *UI) (string, error) {
+	if ui.In != nil && ui.In.Started() {
+		return ui.In.ReadLine(cmd.Context()) // a line reader already owns stdin
+	}
+	var line []byte
+	b := make([]byte, 1)
+	for {
+		n, err := a.In.Read(b)
+		if n == 1 {
+			if b[0] == '\n' {
+				return strings.TrimRight(string(line), "\r"), nil
+			}
+			line = append(line, b[0])
+		}
+		if err != nil {
+			if len(line) > 0 {
+				return string(line), nil
+			}
+			return "", errEOF
+		}
+	}
 }
 
 func (a *App) newUI() *UI {
