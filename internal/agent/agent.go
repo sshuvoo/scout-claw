@@ -32,7 +32,7 @@ const (
 // Reporter receives progress for display. All methods must be cheap and non-blocking.
 type Reporter interface {
 	Delta(text string) // a chunk of the model's output text, as it streams in
-	EndTurn()           // the model's output text for the current turn is complete
+	EndTurn()          // the model's output text for the current turn is complete
 	Plan(steps []task.Step, hypothesis string)
 	ToolStart(summary string)
 	ToolEnd(o executor.Outcome)
@@ -51,7 +51,8 @@ func (nopReporter) Notice(string)            {}
 type Limits struct {
 	MaxSteps            int
 	TaskTimeout         time.Duration
-	MaxConsecutiveFails int // consecutive failed tool calls before giving up
+	MaxConsecutiveFails int   // consecutive failed tool calls before giving up
+	CompactAt           int64 // context tokens at which the provider compacts the conversation (0: off)
 }
 
 type Agent struct {
@@ -67,6 +68,10 @@ type Agent struct {
 	Preamble   func(prompt string) string // builds the first user message of a session
 	PreviousID string                     // provider conversation pointer (resumable)
 	Carry      []llm.ToolOutput           // outputs the provider still expects from the last task
+
+	// ContextTokens is the input size of the latest model turn: roughly how
+	// much conversation the model is carrying.
+	ContextTokens int64
 }
 
 type Result struct {
@@ -134,23 +139,41 @@ func (a *Agent) loop(ctx context.Context, prompt string, rep Reporter) (res Resu
 	}()
 
 	consecFail, empty := 0, 0
+	compacted := false      // remind the model of the task on its next turn
+	compactionSeen := false // the server reports a compaction on every turn past the threshold; restate once per task
+	remind := func(text string) string {
+		if !compacted {
+			return text
+		}
+		compacted = false
+		return strings.TrimSpace(a.reminder(prompt) + "\n\n" + text)
+	}
 	for step := 1; step <= a.Limits.MaxSteps; step++ {
 		res.Steps = step
+		req.CompactAt = a.Limits.CompactAt
 		resp, err := a.LLM.Generate(ctx, req)
 		if err != nil {
 			return a.failed(ctx, res, err)
 		}
 		a.PreviousID = resp.ID
+		a.ContextTokens = resp.Usage.InputTokens
 		pending = nil
 		res.Usage.InputTokens += resp.Usage.InputTokens
 		res.Usage.OutputTokens += resp.Usage.OutputTokens
 		rep.EndTurn()
+		if resp.Compacted {
+			a.Audit.Log(audit.Event{SessionID: a.SessionID, Kind: "compaction", Data: map[string]any{"context_tokens": resp.Usage.InputTokens}})
+			if !compactionSeen {
+				compactionSeen, compacted = true, true
+				rep.Notice(fmt.Sprintf("conversation compacted (context was %d tokens); the task and plan are restated to the model", resp.Usage.InputTokens))
+			}
+		}
 
 		if len(resp.ToolCalls) == 0 {
 			switch {
 			case resp.Incomplete != "":
 				rep.Notice("model stopped early (" + resp.Incomplete + "); asking it to continue")
-				req = llm.Request{Instructions: SystemPrompt, UserText: "Your last response was cut off. Continue, concisely: call a tool or finish.", Tools: a.specs(), PreviousID: a.PreviousID, OnDelta: rep.Delta}
+				req = llm.Request{Instructions: SystemPrompt, UserText: remind("Your last response was cut off. Continue, concisely: call a tool or finish."), Tools: a.specs(), PreviousID: a.PreviousID, OnDelta: rep.Delta}
 				continue
 			case strings.TrimSpace(resp.Text) == "":
 				empty++
@@ -158,7 +181,7 @@ func (a *Agent) loop(ctx context.Context, prompt string, rep Reporter) (res Resu
 					res.Status, res.Err = StatusError, errors.New("the model returned empty responses repeatedly")
 					return res
 				}
-				req = llm.Request{Instructions: SystemPrompt, UserText: "Your last response was empty. Call a tool to continue, or call finish.", Tools: a.specs(), PreviousID: a.PreviousID, OnDelta: rep.Delta}
+				req = llm.Request{Instructions: SystemPrompt, UserText: remind("Your last response was empty. Call a tool to continue, or call finish."), Tools: a.specs(), PreviousID: a.PreviousID, OnDelta: rep.Delta}
 				continue
 			}
 			// A plain-text answer ends the task. Its verification status is judged
@@ -205,7 +228,7 @@ func (a *Agent) loop(ctx context.Context, prompt string, rep Reporter) (res Resu
 		if ctx.Err() != nil {
 			return a.ended(ctx, res)
 		}
-		req = llm.Request{Instructions: SystemPrompt, ToolOutputs: outputs, Tools: a.specs(), PreviousID: a.PreviousID, OnDelta: rep.Delta}
+		req = llm.Request{Instructions: SystemPrompt, UserText: remind(""), ToolOutputs: outputs, Tools: a.specs(), PreviousID: a.PreviousID, OnDelta: rep.Delta}
 		if consecFail >= a.Limits.MaxConsecutiveFails {
 			res.Status = StatusStuck
 			res = a.wrapUp(ctx, res, &req, fmt.Sprintf("%d tool calls in a row failed", consecFail), rep)
@@ -263,6 +286,7 @@ func (a *Agent) wrapUp(ctx context.Context, res Result, req *llm.Request, why st
 		return a.ended(ctx, res)
 	}
 	req.Tools = nil
+	req.CompactAt = a.Limits.CompactAt
 	req.UserText = "STOP: " + why + ". Do not call any tools. Write a brief honest status report: what you found, what you changed, what is verified versus only suspected, and what remains."
 	resp, err := a.LLM.Generate(ctx, *req)
 	if err != nil {
@@ -278,6 +302,24 @@ func (a *Agent) wrapUp(ctx context.Context, res Result, req *llm.Request, why st
 	as := a.State.Tracker.Assess(verify.Unverified, false)
 	res.Verify = as.Status
 	return res
+}
+
+// reminder restates what the compacted conversation must not lose.
+func (a *Agent) reminder(prompt string) string {
+	var b strings.Builder
+	b.WriteString("[ScoutClaw] Earlier turns of this conversation were compacted to save context. Keep working on the current request:\n")
+	b.WriteString(prompt)
+	if plan, hyp := a.State.CurrentPlan(); len(plan) > 0 {
+		b.WriteString("\nCurrent plan:")
+		for _, s := range plan {
+			fmt.Fprintf(&b, "\n- [%s] %s", s.Status, s.Step)
+		}
+		if hyp != "" {
+			b.WriteString("\nHypothesis: " + hyp)
+		}
+	}
+	b.WriteString("\nUse fs_changes to see the files you changed so far, and read files again before editing them if you no longer have their exact contents.")
+	return b.String()
 }
 
 func (a *Agent) specs() []llm.ToolSpec {

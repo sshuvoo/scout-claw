@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"scoutclaw/internal/config"
 	"scoutclaw/internal/executor"
 	"scoutclaw/internal/llm"
+	"scoutclaw/internal/platform"
 	"scoutclaw/internal/policy"
 	"scoutclaw/internal/redact"
 	"scoutclaw/internal/tools/builtin"
@@ -258,5 +260,97 @@ func TestPlainAnswerAfterChangesIsMarkedUnverified(t *testing.T) {
 	res := r.a.Run(context.Background(), "x")
 	if res.Verify != verify.Unverified {
 		t.Fatalf("a confident sentence is not evidence: %+v", res)
+	}
+}
+
+func TestCompactionRestatesTaskAndPlanOnce(t *testing.T) {
+	plan := map[string]any{"steps": []map[string]any{{"step": "find the port setting", "status": "in_progress"}}, "hypothesis": "port is wrong"}
+	var r *rig
+	r = newRig(t, config.ApprovalAuto,
+		func(req llm.Request) (*llm.Response, error) {
+			if req.CompactAt != 150000 {
+				t.Errorf("first request CompactAt = %d", req.CompactAt)
+			}
+			return &llm.Response{ToolCalls: []llm.ToolCall{tc("1", "update_plan", plan)}, Usage: llm.Usage{InputTokens: 170000}}, nil
+		},
+		func(req llm.Request) (*llm.Response, error) {
+			// the plan was set by this turn's tool call; the compaction came with the next response
+			return &llm.Response{ToolCalls: []llm.ToolCall{tc("2", "update_plan", plan)}, Compacted: true, Usage: llm.Usage{InputTokens: 40000}}, nil
+		},
+		func(req llm.Request) (*llm.Response, error) {
+			for _, want := range []string{"were compacted", "fix the port in app.conf", "[in_progress] find the port setting", "Hypothesis: port is wrong", "fs_changes"} {
+				if !strings.Contains(req.UserText, want) {
+					t.Errorf("reminder missing %q:\n%s", want, req.UserText)
+				}
+			}
+			if len(req.ToolOutputs) != 1 || req.CompactAt != 150000 {
+				t.Errorf("tool outputs must still be delivered with the reminder: %+v", req)
+			}
+			// the server keeps reporting compaction on every turn past the threshold
+			return &llm.Response{ToolCalls: []llm.ToolCall{tc("3", "update_plan", plan)}, Compacted: true, Usage: llm.Usage{InputTokens: 42000}}, nil
+		},
+		func(req llm.Request) (*llm.Response, error) {
+			if req.UserText != "" {
+				t.Errorf("the reminder must be sent only once per task, got %q", req.UserText)
+			}
+			return &llm.Response{Text: "done", Usage: llm.Usage{InputTokens: 43000}}, nil
+		},
+	)
+	r.a.Limits.CompactAt = 150000
+	res := r.a.Run(context.Background(), "fix the port in app.conf")
+	if res.Status != StatusCompleted || r.a.ContextTokens != 43000 {
+		t.Fatalf("status %s, context tokens %d", res.Status, r.a.ContextTokens)
+	}
+	if len(r.llm.Requests) != 4 {
+		t.Fatalf("requests: %d", len(r.llm.Requests))
+	}
+}
+
+func TestBackgroundProcessesDoNotDemandVerification(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses the sleep command")
+	}
+	r := newRig(t, config.ApprovalAuto,
+		llm.Calls(tc("1", "proc_start", map[string]any{"command": "sleep", "args": []string{"30"}, "wait_sec": 1})),
+		llm.Calls(tc("2", "proc_stop", map[string]any{"id": "p1"})),
+		llm.Calls(tc("3", "finish", map[string]any{"summary": "checked the server", "status": "verified", "evidence": "manual"})),
+	)
+	res := r.a.Run(context.Background(), "start and stop a server")
+	if res.Status != StatusCompleted || res.Report == nil {
+		t.Fatalf("finish should be accepted without a verify command: %+v", res)
+	}
+	if n := len(r.a.State.Tracker.Changes()); n != 0 {
+		t.Fatalf("starting/stopping a background process must not count as a change, got %d", n)
+	}
+}
+
+func TestTaskContextIncludesProjectInstructions(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv(config.EnvConfigDir, home)
+	root := t.TempDir()
+	sub := filepath.Join(root, "svc")
+	os.MkdirAll(sub, 0o755)
+	os.WriteFile(filepath.Join(home, "SCOUT.md"), []byte("Personal: prefer small diffs."), 0o644)
+	os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("Project: run make test."), 0o644)
+	os.WriteFile(filepath.Join(sub, "AGENTS.md"), []byte("Service: use the svc Makefile."), 0o644)
+	os.WriteFile(filepath.Join(root, "EXTRA.md"), []byte(strings.Repeat("x", maxInstructionBytes)), 0o644)
+	cfg := &config.Config{Workspace: sub, ProjectRoot: root, Instructions: []string{filepath.Join(root, "EXTRA.md")}, Approval: config.ApprovalAsk, MaxSteps: 5}
+	got := TaskContext(cfg, platform.Info{OS: "linux"}, "fix it")
+	order := []string{"Project instructions", "Personal: prefer small diffs.", "Project: run make test.", "Service: use the svc Makefile.", "[truncated]", "User request:\nfix it"}
+	last := -1
+	for _, w := range order {
+		i := strings.Index(got, w)
+		if i < 0 || i < last {
+			t.Fatalf("%q missing or out of order in:\n%s", w, got[:min(len(got), 2000)])
+		}
+		last = i
+	}
+	if len(got) > maxInstructionBytes+4096 {
+		t.Fatalf("instructions must be capped: %d bytes", len(got))
+	}
+	t.Setenv(config.EnvConfigDir, t.TempDir())
+	none := TaskContext(&config.Config{Workspace: t.TempDir(), ProjectRoot: t.TempDir()}, platform.Info{OS: "linux"}, "x")
+	if strings.Contains(none, "Project instructions") {
+		t.Fatal("no files: no instructions section")
 	}
 }

@@ -77,7 +77,37 @@ Full guide, including PATH setup, upgrading from the first version, updating, un
 
 ## Configure
 
-Precedence: **flags > environment variables > `.env` files > defaults**. `.env` files are read from `./.env`, `~/.scoutclaw.env`, `~/.scout.env`, `~/.env` (unchanged from before) and never override variables that are already set. Copy `.env.example` and fill in the key; real `.env` files are git-ignored.
+Precedence: **flags > environment variables > `.scout/config.local.json` > `.scout/config.json` > `~/.scout/config.json` > `.env` files > defaults**. `.env` files are read from `./.env`, `~/.scoutclaw.env`, `~/.scout.env`, `~/.env` (unchanged from before) and never override variables that are already set. Copy `.env.example` and fill in the key; real `.env` files are git-ignored. `scout config` shows every value with the file or variable it came from.
+
+### Config files and permissions
+
+| File | Scope | Commit it? |
+|---|---|---|
+| `~/.scout/config.json` | you, every project (`SCOUT_CONFIG_DIR` moves the folder) | – |
+| `.scout/config.json` | the project, shared with the team | yes |
+| `.scout/config.local.json` | you, this project (git-ignored via `.scout/.gitignore`) | no |
+
+The project is the nearest folder at or above the workspace that has a `.scout/` directory (`scout init` creates one); the workspace itself does not change. Keys are the camelCase names of the settings above (`model`, `approval`, `maxSteps`, `toolTimeout`, `taskTimeout`, `maxOutput`, `maxRead`, `compactAt`; `baseUrl` only in the global file), plus `permissions` and `instructions`. API keys are never read from config files. A JSON Schema for editor autocomplete is in [`schema/config.schema.json`](schema/config.schema.json).
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/sshuvoo/scout-claw/main/schema/config.schema.json",
+  "approval": "edits",
+  "permissions": {
+    "allow": ["shell_exec(go test *)", "fs_write(src/**)"],
+    "ask":   ["shell_exec(git push *)"],
+    "deny":  ["fs_read(**/.env*)", "fs_delete(migrations/**)"],
+    "additionalDirectories": ["../shared-lib"]
+  },
+  "instructions": ["docs/CONTRIBUTING.md"]
+}
+```
+
+**Rules** are `Tool` or `Tool(spec)`: file tools take a path glob relative to the project (`src/**`, `**/.env*`, or an absolute/`~/` path), `shell_exec`/`proc_start` take a command where a trailing ` *` allows further arguments, `net_*` take `domain:host`. They are checked after the built-in refusals and before the approval mode: **deny** wins, then **ask** (asks even in `auto`), then **allow**. An allow rule must match every path an action touches. `shell_script`/`shell_powershell` can be denied or asked about but never allowed, and rules from the shared project file never allow high-risk actions. Manage rules with `scout permissions [add|remove]`, settings with `scout config get|set|unset [--global|--project|--local]`; in chat, `/permissions` lists them. When an approval prompt offers **`[p] always in this project`**, ScoutClaw saves the narrow rule it shows (for example `shell_exec(go test *)`) to `.scout/config.local.json`.
+
+**Trust.** A cloned repository could ship a `.scout/config.json` that loosens checks. Its loosening settings (allow rules, `approval: auto`/`edits`, `additionalDirectories`, `instructions`) apply only after you trust it: ScoutClaw lists them and asks once, records your answer in `~/.scout/trusted.json` together with a hash of the file, and asks again if the file changes. Without a terminal they are ignored unless you pass `--trust-workspace` for that run. Tightening settings (deny and ask rules, `readonly`) always apply. `scout trust [--revoke]` manages it explicitly.
+
+**Instructions.** `~/.scout/SCOUT.md`, then `AGENTS.md` and `SCOUT.md` at the project root (and at the workspace, if it is a subfolder), then files listed in `instructions` are added to the first message of each session (32 KiB in total). They guide conventions and workflow; they cannot override your request, the policy or approvals.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -85,11 +115,13 @@ Precedence: **flags > environment variables > `.env` files > defaults**. `.env` 
 | `OPENAI_BASE_URL` | provider default | Alternative endpoint (must support the Responses API). |
 | `SCOUTCLAW_MODEL` / `--model` | `gpt-5.5` | Model name. |
 | `SCOUTCLAW_WORKSPACE` / `--workspace` | current dir | The only place edits are allowed without extra approval. |
-| `SCOUTCLAW_APPROVAL` / `--approval` | `ask` | `ask`, `auto` or `readonly` (see below). |
-| `SCOUTCLAW_MAX_STEPS` / `--max-steps` | `25` | Model iterations per task (1–200). |
+| `SCOUTCLAW_APPROVAL` / `--approval` | `ask` | `ask`, `edits`, `auto` or `readonly` (see below). |
+| `SCOUTCLAW_MAX_STEPS` / `--max-steps` | `100` | Model iterations per task (1–500). Coding tasks need far more than diagnostics; when the limit is hit, ScoutClaw asks the model for an honest status report, and in chat you can say "continue". |
 | `SCOUTCLAW_TOOL_TIMEOUT` | `2m` | Per-command timeout. |
 | `SCOUTCLAW_TASK_TIMEOUT` | `30m` | Whole-task timeout. |
 | `SCOUTCLAW_MAX_OUTPUT` | `16384` | Bytes of tool output kept per call. |
+| `SCOUTCLAW_MAX_READ` | `65536` | Bytes of file content `fs_read` may return per call (4096–1048576). |
+| `SCOUTCLAW_COMPACT_AT` | `200000` | When the conversation reaches this many tokens, the provider compacts earlier turns (OpenAI Responses `context_management`), and ScoutClaw restates the task and plan to the model. `0` turns it off; servers that do not support it are detected and it is skipped. Minimum 20000. `/status` shows the current conversation size. |
 | `SCOUTCLAW_STATE_DIR` | `~/.local/state/scoutclaw` | Sessions, audit log, file backups (mode 0600/0700). |
 
 Invalid values fail at startup with a clear message. `scout config` shows the effective values (key masked).
@@ -113,7 +145,10 @@ scout run --resume last "Now also check the logs"            # continue a sessio
 | `setup` | Enter your API key once (hidden input); saved for all future runs. |
 | `doctor [--online]` | Checks config, state dir, optional tools, DNS/TCP to the API host; `--online` sends one tiny request to prove key and model work. |
 | `status` | Version, platform, limits, session counts, last session, audit log — no secrets. |
-| `config` | Effective configuration with the variable each value comes from. |
+| `config [get\|set\|unset]` | Effective configuration with the file or variable each value comes from; `set`/`unset` edit `--local` (default), `--project` or `--global` config files. |
+| `permissions [add\|remove]` | List permission rules with their source files, or add/remove one (`scout permissions add allow 'shell_exec(go test *)'`). |
+| `init` | Create `.scout/config.json` and `.scout/.gitignore` for the project. |
+| `trust [--revoke]` | Trust (or stop trusting) the project's shared `.scout/config.json`. |
 | `history [id]` | List sessions; with an id, show its tasks and every recorded action, policy decision and approval. |
 | `version` | Version information. |
 
@@ -123,7 +158,12 @@ Chat/interactive tips: Ctrl-C cancels the running task (children are terminated)
 
 Tools exposed to the model (all go through the same pipeline):
 
-- **Filesystem:** `fs_list`, `fs_read` (line ranges, tail mode), `fs_stat`, `fs_search` (regex + name glob), `fs_write`, `fs_patch` (exact-match edit). Edits show a diff before approval, keep a backup, and write atomically.
+- **Filesystem (read):** `fs_list`, `fs_read` (line ranges, tail mode), `fs_read_many` (several files in one call), `fs_stat`, `fs_glob` (file patterns, newest first), `fs_grep` (regex or fixed-string search with context, file types and files/count output). Searches respect `.gitignore` and skip binary and credential files.
+- **Filesystem (edit):** `fs_write` (create or overwrite), `fs_patch` (exact-text replacement; `edits[]` applies several to one file atomically), `fs_lines` (insert, replace or delete by line number, each guarded by the expected current text), `fs_mkdir`, `fs_copy`, `fs_move`, `fs_delete`. Every edit shows a diff (or a description) before approval, keeps a backup and writes atomically. A file must have been read with `fs_read` before it can be edited, and an edit is refused if the file changed since that read. BOM, CRLF/LF line endings, the trailing newline and file mode are kept. `fs_delete` and anything replaced by an overwrite go to a per-session trash in `SCOUTCLAW_STATE_DIR/trash`, never `unlink`.
+- **Multi-file patches:** `fs_apply_patch` applies one patch that adds, updates, renames and deletes files atomically (all or nothing, rolled back on failure). It accepts the `*** Begin Patch` format of OpenAI's Codex CLI and standard unified diffs; hunks are found by context, tolerating small whitespace differences.
+- **Project discovery:** `project_info` reads manifests (go.mod, package.json, pyproject.toml, Cargo.toml, Maven/Gradle, .NET, Ruby, PHP) and reports the build/test/lint/format commands, package manager, Makefile targets, CI workflows, instruction files (AGENTS.md, CONTRIBUTING.md, …), git branch and nested projects. It never runs anything.
+- **Background processes:** `proc_start` runs dev servers, watchers and databases in the background (one executable, no shell; optionally waits for a readiness line such as `listening on`), `proc_output` returns what they printed since the last check, `proc_stop` stops a process and everything it spawned, `proc_list` lists them. All of them stop when ScoutClaw exits; in chat, `/procs` lists them and `/procs stop <id>` stops one.
+- **Change journal:** `fs_changes` lists this session's file changes with a combined diff per file; `fs_undo` reverts the latest ones (and refuses if a file was changed again afterwards). In chat: `/diff` and `/undo [n]`.
 - **Shell:** `shell_exec` (one executable + argument array, **no shell**), `shell_script` (bash: the system bash on Linux/macOS, Git Bash on Windows; always high risk), `shell_powershell` (Windows only: PowerShell 7, falling back to Windows PowerShell 5.1; always high risk). Override discovery with `SCOUT_BASH_PATH` / `SCOUT_POWERSHELL_PATH`; `scout doctor` shows what was found.
 - **System (Linux):** `sys_info` (OS, kernel, load, memory, swap, disk and inode usage), `process_list` (CPU/memory top, secrets in command lines masked), `env_list` (secret values masked), `dev_runtimes`. Service state and logs use `shell_exec` with `systemctl status` / `journalctl`.
 - **Network:** `net_dns`, `net_connect` (TCP), `net_http` (GET/HEAD, no credentials, bounded).
@@ -139,6 +179,8 @@ Tools exposed to the model (all go through the same pipeline):
 | Medium | `go test`, `npm install`, `docker restart`, edits inside the workspace, unknown commands | asks (`a` = allow this kind for the session) | runs | denied |
 | High | writes outside the workspace, `rm -r`, `systemctl restart`, `apt`, `git push`, `sudo`, firewall/permission changes, any `shell_script` / `shell_powershell` | asks (y/n only) | asks | denied |
 | Refused | `rm -rf /` or `~`, `mkfs`/`dd` to devices, killing PID 1, piping downloads into a shell, reading SSH/GPG/cloud credential files and `/etc/shadow`; on Windows/macOS also `diskpart`/`format`/`diskutil erase*`, deleting shadow copies, `iex` of downloaded content, encoded PowerShell, killing critical system processes | never runs | never | never |
+
+`edits` behaves like `ask`, except that medium-risk file edits inside the workspace (`fs_write`, `fs_patch`, `fs_lines`, `fs_apply_patch`, `fs_mkdir`, `fs_copy`, `fs_move`, `fs_undo`) run without a prompt; a patch that deletes files still asks. Deletes, shell commands and anything outside the workspace still ask.
 
 Further guarantees:
 

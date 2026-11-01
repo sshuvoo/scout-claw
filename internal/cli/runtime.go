@@ -19,6 +19,8 @@ import (
 	"scoutclaw/internal/redact"
 	"scoutclaw/internal/session"
 	"scoutclaw/internal/tools/builtin"
+	"scoutclaw/internal/tools/filesystem"
+	"scoutclaw/internal/tools/shell"
 	"scoutclaw/internal/verify"
 )
 
@@ -43,6 +45,8 @@ type Runtime struct {
 	UI      *UI
 	Agent   *agent.Agent
 	Session *session.Session
+	Files   filesystem.FS     // for /diff and /undo; shares state with the agent's tools
+	Procs   *shell.Background // background processes; stopped by Close
 	audit   *audit.Logger
 }
 
@@ -62,6 +66,11 @@ func newRuntime(cfg *config.Config, ui *UI, sess *session.Session) (*Runtime, er
 	if err != nil {
 		return nil, err
 	}
+	// Parse rules before opening anything, so a bad rule leaks no file handles.
+	rules, err := buildRules(cfg)
+	if err != nil {
+		return nil, err
+	}
 	red := newRedactor(cfg)
 	ui.Redactor = red
 	lg, err := audit.Open(cfg.AuditPath(), red)
@@ -74,20 +83,26 @@ func newRuntime(cfg *config.Config, ui *UI, sess *session.Session) (*Runtime, er
 		sess = session.New(cfg.SessionsDir(), cfg.Workspace, cfg.Model)
 	}
 	plat := platform.Detect()
-	scope := policy.NewScope(cfg.Workspace)
+	scope := policy.NewScope(cfg.Workspace, cfg.ExtraDirs...)
 	tracker := &verify.Tracker{}
-	reg, state := builtin.New(builtin.Options{
-		Scope: scope, BackupDir: cfg.BackupsDir(), SessionID: sess.ID, MaxOutput: cfg.MaxOutput,
+	opts := builtin.Options{
+		Scope: scope, BackupDir: cfg.BackupsDir(), TrashDir: cfg.TrashDir(), Files: filesystem.NewState(cfg.JournalPath(sess.ID)),
+		SessionID: sess.ID, MaxOutput: cfg.MaxOutput, MaxRead: cfg.MaxRead,
 		ToolTimeout: cfg.ToolTimeout, StripEnv: []string{config.EnvAPIKey}, Tracker: tracker,
 		Shells: plat.Shells,
-	})
+	}
+	opts.Background = &shell.Background{Runner: builtin.Runner(opts)}
+	reg, state := builtin.New(opts)
+	engine := policy.New(scope, cfg.Approval)
+	engine.Rules = rules
 	exec := &executor.Executor{
-		Registry: reg, Policy: policy.New(scope, cfg.Approval), Approver: ui, Audit: lg, Redactor: red,
+		Registry: reg, Policy: engine, Approver: ui, Audit: lg, Redactor: red,
 		Tracker: tracker, SessionID: sess.ID, ToolTimeout: cfg.ToolTimeout, MaxOutput: cfg.MaxOutput,
+		PersistRule: func(rule string) error { return persistRule(cfg, engine, rule) },
 	}
 	ag := &agent.Agent{
 		LLM: provider, Exec: exec, Registry: reg, State: state, Audit: lg, Reporter: ui, SessionID: sess.ID,
-		Limits:   agent.Limits{MaxSteps: cfg.MaxSteps, TaskTimeout: cfg.TaskTimeout},
+		Limits:   agent.Limits{MaxSteps: cfg.MaxSteps, TaskTimeout: cfg.TaskTimeout, CompactAt: int64(cfg.CompactAt)},
 		Preamble: func(prompt string) string { return agent.TaskContext(cfg, plat, prompt) },
 	}
 	if resumed {
@@ -99,7 +114,45 @@ func newRuntime(cfg *config.Config, ui *UI, sess *session.Session) (*Runtime, er
 			ui.Notice(fmt.Sprintf("session was created with model %s; continuing with %s", sess.Model, cfg.Model))
 		}
 	}
-	return &Runtime{Cfg: cfg, UI: ui, Agent: ag, Session: sess, audit: lg}, nil
+	return &Runtime{Cfg: cfg, UI: ui, Agent: ag, Session: sess, Files: builtin.FS(opts), Procs: opts.Background, audit: lg}, nil
+}
+
+// buildRules parses the permission rules of all config files. Rules from the
+// global and personal files may allow high-risk actions; shared project
+// rules may not.
+func buildRules(cfg *config.Config) (policy.RuleSet, error) {
+	rs := policy.RuleSet{Base: cfg.ProjectRoot}
+	for _, spec := range cfg.Rules {
+		action, err := policy.ParseRuleAction(spec.Action)
+		if err != nil {
+			return rs, fmt.Errorf("%s: %v", spec.Path, err)
+		}
+		r, err := policy.ParseRule(spec.Text, action, spec.Path, spec.Layer != config.LayerProject)
+		if err != nil {
+			return rs, fmt.Errorf("%s: %v", spec.Path, err)
+		}
+		rs.Add(r)
+	}
+	return rs, nil
+}
+
+// persistRule saves an allow rule in the project's personal config file and
+// applies it to the running session.
+func persistRule(cfg *config.Config, engine *policy.Engine, rule string) error {
+	path, err := cfg.LayerPath(config.LayerLocal)
+	if err != nil {
+		return err
+	}
+	r, err := policy.ParseRule(rule, policy.RuleAllow, path, true)
+	if err != nil {
+		return err
+	}
+	if _, err := config.AddRule(path, "allow", rule); err != nil {
+		return err
+	}
+	engine.Rules.Add(r)
+	cfg.Rules = append(cfg.Rules, config.RuleSpec{Action: "allow", Text: rule, Layer: config.LayerLocal, Path: path})
+	return nil
 }
 
 // syncSession copies the agent's conversation pointer into the session so a
@@ -112,7 +165,13 @@ func (r *Runtime) syncSession() {
 	}
 }
 
-func (r *Runtime) Close() { _ = r.audit.Close() }
+// Close stops the session's background processes and closes the audit log.
+func (r *Runtime) Close() {
+	if n := r.Procs.Shutdown(); n > 0 {
+		r.UI.Notice(fmt.Sprintf("stopped %d background process(es)", n))
+	}
+	_ = r.audit.Close()
+}
 
 // RunTask runs one task. Ctrl-C (SIGINT/SIGTERM) cancels it and terminates any
 // child processes; a second Ctrl-C exits immediately.

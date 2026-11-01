@@ -30,12 +30,13 @@ const (
 
 // Result is the structured outcome of a tool run.
 type Result struct {
-	Output    string            // text shown to the model (redacted and truncated by the executor)
-	ExitCode  int               // process exit code, 0 for non-process tools on success
-	Kind      Kind              // KindNone on success
-	Truncated bool              // output was cut to the size limit
-	Mutated   bool              // the tool changed system or workspace state
-	Metadata  map[string]string // duration, paths, backup locations, ...
+	Output      string            // text shown to the model (redacted and truncated by the executor)
+	ExitCode    int               // process exit code, 0 for non-process tools on success
+	Kind        Kind              // KindNone on success
+	Truncated   bool              // output was cut to the size limit
+	OutputLimit int               // raises the executor's output cap for this result (file reads)
+	Mutated     bool              // the tool changed system or workspace state
+	Metadata    map[string]string // duration, paths, backup locations, ...
 }
 
 func (r Result) OK() bool { return r.Kind == KindNone && r.ExitCode == 0 }

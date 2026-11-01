@@ -16,7 +16,9 @@ import (
 func setup(t *testing.T) (FS, string, map[string]tools.Tool) {
 	ws := t.TempDir()
 	ws, _ = filepath.EvalSymlinks(ws)
-	f := FS{Scope: policy.NewScope(ws), BackupDir: filepath.Join(t.TempDir(), "bk"), SessionID: "s1"}
+	state := t.TempDir()
+	f := FS{Scope: policy.NewScope(ws), BackupDir: filepath.Join(state, "bk"), TrashDir: filepath.Join(state, "trash"), SessionID: "s1",
+		State: NewState(filepath.Join(state, "journal.jsonl"))}
 	m := map[string]tools.Tool{}
 	for _, tl := range f.Tools() {
 		m[tl.Name()] = tl
@@ -77,6 +79,7 @@ func TestPatchWritesDiffAndBackup(t *testing.T) {
 	p := filepath.Join(ws, "app.conf")
 	os.WriteFile(p, []byte("port=80\nmode=dev\n"), 0o640)
 	ctx := context.Background()
+	readFile(t, m, "app.conf")
 
 	prev, err := m["fs_patch"].(tools.Previewer).Preview(ctx, json.RawMessage(`{"path":"app.conf","old_string":"port=80","new_string":"port=8080"}`))
 	if err != nil || !strings.Contains(prev, "-port=80") || !strings.Contains(prev, "+port=8080") {
@@ -100,6 +103,7 @@ func TestPatchWritesDiffAndBackup(t *testing.T) {
 	}
 	// ambiguity and absence
 	os.WriteFile(p, []byte("x\nx\n"), 0o644)
+	readFile(t, m, "app.conf")
 	if _, err := run(t, m["fs_patch"], ctx, map[string]any{"path": "app.conf", "old_string": "x", "new_string": "y"}); tools.KindOf(err) != tools.KindInvalidInput {
 		t.Fatalf("ambiguous match must fail: %v", err)
 	}
@@ -109,6 +113,15 @@ func TestPatchWritesDiffAndBackup(t *testing.T) {
 	if _, err := run(t, m["fs_patch"], ctx, map[string]any{"path": "app.conf", "old_string": "x", "new_string": "y", "replace_all": true}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func readFile(t *testing.T, m map[string]tools.Tool, path string) string {
+	t.Helper()
+	r, err := run(t, m["fs_read"], context.Background(), map[string]any{"path": path})
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return r.Output
 }
 
 func TestWriteCreatesAndOverwrites(t *testing.T) {

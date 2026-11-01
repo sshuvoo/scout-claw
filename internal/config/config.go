@@ -1,9 +1,10 @@
 // Package config loads ScoutClaw settings.
 //
-// Precedence (highest first): command-line flags, environment variables
-// (including values loaded from .env files), built-in defaults. .env files are
-// read in the legacy order (./.env, ~/.scoutclaw.env, ~/.scout.env, ~/.env) and
-// never override variables that are already set.
+// Precedence (highest first): command-line flags, environment variables,
+// <project>/.scout/config.local.json, <project>/.scout/config.json,
+// ~/.scout/config.json, .env files, built-in defaults. .env files are read in
+// the legacy order (./.env, ~/.scoutclaw.env, ~/.scout.env, ~/.env) and never
+// override variables that are already set.
 package config
 
 import (
@@ -11,7 +12,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -21,6 +21,9 @@ type Approval string
 const (
 	// ApprovalAsk prompts for medium and high risk actions (default).
 	ApprovalAsk Approval = "ask"
+	// ApprovalEdits runs medium risk file edits inside the workspace without
+	// prompting; everything else behaves like ApprovalAsk.
+	ApprovalEdits Approval = "edits"
 	// ApprovalAuto runs medium risk actions without prompting; high risk still prompts.
 	ApprovalAuto Approval = "auto"
 	// ApprovalReadOnly denies every action that is not low risk.
@@ -28,6 +31,20 @@ const (
 )
 
 const DefaultModel = "gpt-5.5" // the model the original implementation used
+
+// DefaultMaxSteps leaves room for coding tasks (explore, edit, build, test,
+// fix, re-test); simple diagnostics finish long before it.
+const (
+	DefaultMaxSteps = 100
+	MaxMaxSteps     = 500
+)
+
+// DefaultCompactAt keeps long coding sessions well inside current context
+// windows and bounds what every turn costs.
+const (
+	DefaultCompactAt = 200_000
+	MinCompactAt     = 20_000
+)
 
 type Config struct {
 	APIKey      string // never printed; see Masked
@@ -40,7 +57,24 @@ type Config struct {
 	ToolTimeout time.Duration
 	TaskTimeout time.Duration
 	MaxOutput   int // bytes of tool output kept per call
+	MaxRead     int // bytes of file content fs_read may return
+	CompactAt   int // context size in tokens at which the provider compacts the conversation; 0 disables
 	LogLevel    string
+
+	ProjectRoot  string            // directory holding .scout/ (the workspace when there is none)
+	Sources      map[string]string // setting key -> where its value came from
+	Rules        []RuleSpec        // permission rules from all config files, lowest layer first
+	ExtraDirs    []string          // additional writable directories (permissions.additionalDirectories)
+	Instructions []string          // extra instruction files listed in config files
+	Trust        Trust             // state of the shared project config
+	Warnings     []string          // problems that did not stop loading
+}
+
+// Options adjust loading.
+type Options struct {
+	// TrustProject applies the shared project config fully for this run
+	// without recording trust (scout --trust-workspace).
+	TrustProject bool
 }
 
 // Env names. OPENAI_API_KEY and OPENAI_BASE_URL are the pre-existing conventions.
@@ -55,21 +89,29 @@ const (
 	EnvToolTimeout = "SCOUTCLAW_TOOL_TIMEOUT"
 	EnvTaskTimeout = "SCOUTCLAW_TASK_TIMEOUT"
 	EnvMaxOutput   = "SCOUTCLAW_MAX_OUTPUT"
+	EnvMaxRead     = "SCOUTCLAW_MAX_READ"
+	EnvCompactAt   = "SCOUTCLAW_COMPACT_AT"
 	EnvLogLevel    = "SCOUTCLAW_LOG_LEVEL"
 )
 
-// Load reads configuration from the environment. Call LoadDotEnv first.
-func Load() (*Config, error) {
+// Load reads configuration from defaults, .env files, config files and the
+// environment. Call LoadDotEnv first.
+func Load() (*Config, error) { return LoadWith(Options{}) }
+
+// LoadWith is Load with options.
+func LoadWith(o Options) (*Config, error) {
 	c := &Config{
 		APIKey:      os.Getenv(EnvAPIKey),
-		BaseURL:     os.Getenv(EnvBaseURL),
-		Model:       getenv(EnvModel, DefaultModel),
-		Approval:    Approval(getenv(EnvApproval, string(ApprovalAsk))),
-		MaxSteps:    25, // same limit as the original loop
+		Model:       DefaultModel,
+		Approval:    ApprovalAsk,
+		MaxSteps:    DefaultMaxSteps,
 		ToolTimeout: 2 * time.Minute,
 		TaskTimeout: 30 * time.Minute,
 		MaxOutput:   16 * 1024,
-		LogLevel:    getenv(EnvLogLevel, "warn"),
+		MaxRead:     64 * 1024,
+		CompactAt:   DefaultCompactAt,
+		LogLevel:    "warn",
+		Sources:     map[string]string{},
 	}
 	var err error
 	if c.Workspace, err = resolveWorkspace(os.Getenv(EnvWorkspace)); err != nil {
@@ -78,17 +120,32 @@ func Load() (*Config, error) {
 	if c.StateDir, err = resolveStateDir(os.Getenv(EnvStateDir)); err != nil {
 		return nil, err
 	}
-	if c.MaxSteps, err = envInt(EnvMaxSteps, c.MaxSteps); err != nil {
+	c.ProjectRoot = FindProjectRoot(c.Workspace)
+	settings := settingsFor(c)
+	for _, s := range settings {
+		c.Sources[s.key] = "default"
+	}
+	// .env values are the lowest layer above defaults ...
+	for _, s := range settings {
+		if file, ok := dotEnvKeys[s.env]; ok && strings.TrimSpace(os.Getenv(s.env)) != "" {
+			if err := s.apply(c, os.Getenv(s.env)); err != nil {
+				return nil, fmt.Errorf("%s (from %s): %v", s.env, file, err)
+			}
+			c.Sources[s.key] = file
+		}
+	}
+	// ... then config files ...
+	if err := c.loadFiles(o.TrustProject); err != nil {
 		return nil, err
 	}
-	if c.MaxOutput, err = envInt(EnvMaxOutput, c.MaxOutput); err != nil {
-		return nil, err
-	}
-	if c.ToolTimeout, err = envDuration(EnvToolTimeout, c.ToolTimeout); err != nil {
-		return nil, err
-	}
-	if c.TaskTimeout, err = envDuration(EnvTaskTimeout, c.TaskTimeout); err != nil {
-		return nil, err
+	// ... and real environment variables override them.
+	for _, s := range settings {
+		if c.envOverrides(s.env) {
+			if err := s.apply(c, os.Getenv(s.env)); err != nil {
+				return nil, fmt.Errorf("%s: %v", s.env, err)
+			}
+			c.Sources[s.key] = "env " + s.env
+		}
 	}
 	return c, c.Validate()
 }
@@ -97,15 +154,23 @@ func Load() (*Config, error) {
 // commands such as `config` and `doctor` must work without one (see RequireAPIKey).
 func (c *Config) Validate() error {
 	switch c.Approval {
-	case ApprovalAsk, ApprovalAuto, ApprovalReadOnly:
+	case ApprovalAsk, ApprovalEdits, ApprovalAuto, ApprovalReadOnly:
+	case "":
+		c.Approval = ApprovalAsk
 	default:
-		return fmt.Errorf("invalid approval policy %q (want ask, auto or readonly)", c.Approval)
+		return fmt.Errorf("invalid approval policy %q (want ask, edits, auto or readonly)", c.Approval)
 	}
-	if c.MaxSteps < 1 || c.MaxSteps > 200 {
-		return fmt.Errorf("max steps must be between 1 and 200, got %d", c.MaxSteps)
+	if c.MaxSteps < 1 || c.MaxSteps > MaxMaxSteps {
+		return fmt.Errorf("max steps must be between 1 and %d, got %d", MaxMaxSteps, c.MaxSteps)
 	}
 	if c.MaxOutput < 1024 || c.MaxOutput > 1<<20 {
 		return fmt.Errorf("max output must be between 1024 and 1048576 bytes, got %d", c.MaxOutput)
+	}
+	if c.CompactAt != 0 && c.CompactAt < MinCompactAt {
+		return fmt.Errorf("compact-at must be 0 (off) or at least %d tokens, got %d", MinCompactAt, c.CompactAt)
+	}
+	if c.MaxRead < 4096 || c.MaxRead > 1<<20 {
+		return fmt.Errorf("max read must be between 4096 and 1048576 bytes, got %d", c.MaxRead)
 	}
 	if c.ToolTimeout < time.Second || c.TaskTimeout < c.ToolTimeout {
 		return fmt.Errorf("timeouts invalid: tool=%s task=%s (tool >= 1s, task >= tool)", c.ToolTimeout, c.TaskTimeout)
@@ -126,6 +191,12 @@ func (c *Config) RequireAPIKey() error {
 func (c *Config) AuditPath() string   { return filepath.Join(c.StateDir, "audit.jsonl") }
 func (c *Config) SessionsDir() string { return filepath.Join(c.StateDir, "sessions") }
 func (c *Config) BackupsDir() string  { return filepath.Join(c.StateDir, "backups") }
+func (c *Config) TrashDir() string    { return filepath.Join(c.StateDir, "trash") }
+
+// JournalPath is the file-change journal of one session (used by fs_changes and fs_undo).
+func (c *Config) JournalPath(sessionID string) string {
+	return filepath.Join(c.StateDir, "journal", sessionID+".jsonl")
+}
 
 // MaskedKey describes the key without revealing it.
 func (c *Config) MaskedKey() string {
@@ -137,37 +208,6 @@ func (c *Config) MaskedKey() string {
 	default:
 		return "set (" + c.APIKey[:3] + "…, " + fmt.Sprint(len(c.APIKey)) + " chars)"
 	}
-}
-
-func getenv(k, def string) string {
-	if v := strings.TrimSpace(os.Getenv(k)); v != "" {
-		return v
-	}
-	return def
-}
-
-func envInt(k string, def int) (int, error) {
-	v := strings.TrimSpace(os.Getenv(k))
-	if v == "" {
-		return def, nil
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		return 0, fmt.Errorf("%s: %q is not an integer", k, v)
-	}
-	return n, nil
-}
-
-func envDuration(k string, def time.Duration) (time.Duration, error) {
-	v := strings.TrimSpace(os.Getenv(k))
-	if v == "" {
-		return def, nil
-	}
-	d, err := time.ParseDuration(v)
-	if err != nil {
-		return 0, fmt.Errorf("%s: %q is not a duration (e.g. 90s, 5m)", k, v)
-	}
-	return d, nil
 }
 
 func resolveWorkspace(v string) (string, error) {
@@ -213,6 +253,10 @@ func LoadDotEnv() {
 	}
 }
 
+// dotEnvKeys records variables set from .env files (name -> file), which rank
+// below config files.
+var dotEnvKeys = map[string]string{}
+
 func parseEnvFile(path string) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -234,6 +278,7 @@ func parseEnvFile(path string) {
 		v = strings.Trim(strings.TrimSpace(v), `"'`)
 		if k != "" && os.Getenv(k) == "" {
 			_ = os.Setenv(k, v)
+			dotEnvKeys[k] = path
 		}
 	}
 }

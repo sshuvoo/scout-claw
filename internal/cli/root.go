@@ -26,6 +26,7 @@ type flags struct {
 	verbose   bool
 	noColor   bool
 	plain     bool
+	trust     bool
 }
 
 type App struct {
@@ -35,6 +36,7 @@ type App struct {
 	fl     flags
 	input  *Input
 	stdinT bool
+	warned bool // config warnings were printed once
 }
 
 // Execute runs the CLI and returns the process exit code.
@@ -81,12 +83,13 @@ fix (with your approval for anything risky) and verifies the result.
 	}
 	pf := root.PersistentFlags()
 	pf.StringVar(&a.fl.workspace, "workspace", "", "directory the agent may modify (default: current directory; env "+config.EnvWorkspace+")")
-	pf.StringVar(&a.fl.approval, "approval", "", "approval policy: ask | auto | readonly (default ask; env "+config.EnvApproval+")")
+	pf.StringVar(&a.fl.approval, "approval", "", "approval policy: ask | edits | auto | readonly (default ask; env "+config.EnvApproval+")")
 	pf.StringVar(&a.fl.model, "model", "", "model name (default "+config.DefaultModel+"; env "+config.EnvModel+")")
-	pf.IntVar(&a.fl.maxSteps, "max-steps", 0, "maximum agent iterations per task (default 25; env "+config.EnvMaxSteps+")")
+	pf.IntVar(&a.fl.maxSteps, "max-steps", 0, fmt.Sprintf("maximum agent iterations per task (default %d; env %s)", config.DefaultMaxSteps, config.EnvMaxSteps))
 	pf.BoolVarP(&a.fl.verbose, "verbose", "v", false, "show more tool output")
 	pf.BoolVar(&a.fl.noColor, "no-color", false, "disable colored output")
 	pf.BoolVar(&a.fl.plain, "plain", false, "use the simple line-based chat instead of the full-screen UI")
+	pf.BoolVar(&a.fl.trust, "trust-workspace", false, "apply this project's shared .scout/config.json fully for this run, without recording trust")
 	root.Flags().StringVar(&a.fl.resume, "resume", "", "resume a session: an id or 'last'")
 
 	run := &cobra.Command{
@@ -123,7 +126,8 @@ fix (with your approval for anything risky) and verifies the result.
 			return nil
 		},
 	}
-	root.AddCommand(setup, a.updateCmd(), run, chat, a.doctorCmd(), a.statusCmd(), a.configCmd(), a.historyCmd(), a.versionCmd())
+	root.AddCommand(setup, a.updateCmd(), run, chat, a.doctorCmd(), a.statusCmd(), a.configCmd(), a.historyCmd(), a.versionCmd(),
+		a.initCmd(), a.permissionsCmd(), a.trustCmd())
 	return root
 }
 
@@ -133,21 +137,59 @@ func (a *App) loadConfig(cmd *cobra.Command) (*config.Config, error) {
 	if a.fl.workspace != "" {
 		os.Setenv(config.EnvWorkspace, a.fl.workspace)
 	}
-	cfg, err := config.Load()
+	cfg, err := config.LoadWith(config.Options{TrustProject: a.fl.trust})
 	if err != nil {
 		return nil, err
 	}
 	changed := func(n string) bool { f := cmd.Flags().Lookup(n); return f != nil && f.Changed }
 	if changed("approval") {
-		cfg.Approval = config.Approval(a.fl.approval)
+		cfg.Approval, cfg.Sources["approval"] = config.Approval(a.fl.approval), "flag --approval"
 	}
 	if changed("model") {
-		cfg.Model = a.fl.model
+		cfg.Model, cfg.Sources["model"] = a.fl.model, "flag --model"
 	}
 	if changed("max-steps") {
-		cfg.MaxSteps = a.fl.maxSteps
+		cfg.MaxSteps, cfg.Sources["maxSteps"] = a.fl.maxSteps, "flag --max-steps"
+	}
+	if !a.warned {
+		a.warned = true
+		for _, w := range cfg.Warnings {
+			fmt.Fprintln(a.Err, "! "+w)
+		}
 	}
 	return cfg, cfg.Validate()
+}
+
+// ensureTrust asks whether to trust a project's shared config when it would
+// loosen anything and has not been trusted with its current content. Without
+// a terminal the loosening settings stay ignored.
+func (a *App) ensureTrust(cmd *cobra.Command, cfg *config.Config, ui *UI) (*config.Config, error) {
+	t := cfg.Trust
+	if !t.Needed() {
+		return cfg, nil
+	}
+	fmt.Fprintf(a.Out, "%s\n", ui.c(cYellow+cBold, "This project's shared settings ("+t.SharedPath+") would loosen ScoutClaw's safety checks:"))
+	for _, l := range t.Loosening {
+		fmt.Fprintf(a.Out, "  - %s\n", l)
+	}
+	if !a.stdinT {
+		fmt.Fprintln(a.Err, "! not trusted: these settings are ignored (no terminal to ask). Run `scout trust` in this project, or pass --trust-workspace for one run.")
+		return cfg, nil
+	}
+	fmt.Fprint(a.Out, "Trust this project's settings? Only say yes if you trust the repository. [y/N]: ")
+	line, err := ui.In.ReadLine(cmd.Context())
+	if err != nil {
+		return nil, err
+	}
+	if ans := strings.ToLower(strings.TrimSpace(line)); ans != "y" && ans != "yes" {
+		fmt.Fprintln(a.Out, "Not trusted: those settings are ignored; stricter settings (deny/ask rules) still apply.")
+		return cfg, nil
+	}
+	if err := cfg.TrustProject(); err != nil {
+		return nil, err
+	}
+	fmt.Fprintln(a.Out, ui.c(cGreen, "Trusted. ScoutClaw asks again if this file changes."))
+	return a.loadConfig(cmd)
 }
 
 func (a *App) newUI() *UI {
@@ -180,11 +222,14 @@ func (a *App) runTask(cmd *cobra.Command, prompt string) error {
 	if err != nil {
 		return err
 	}
+	ui := a.newUI()
+	if cfg, err = a.ensureTrust(cmd, cfg, ui); err != nil {
+		return err
+	}
 	sess, err := a.resumeSession(cfg)
 	if err != nil {
 		return err
 	}
-	ui := a.newUI()
 	rt, err := newRuntime(cfg, ui, sess)
 	if err != nil {
 		return err

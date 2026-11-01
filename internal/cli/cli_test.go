@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -29,7 +30,9 @@ type harness struct {
 
 func newHarness(t *testing.T, stdin string, steps ...func(llm.Request) (*llm.Response, error)) *harness {
 	ws := t.TempDir()
-	t.Setenv("HOME", t.TempDir()) // never read the developer's real ~/.scoutclaw.env
+	home := t.TempDir()
+	t.Setenv("HOME", home)        // never read the developer's real ~/.scoutclaw.env or ~/.scout
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
 	t.Setenv(config.EnvStateDir, t.TempDir())
 	t.Setenv(config.EnvWorkspace, ws)
 	t.Setenv(config.EnvAPIKey, "sk-test-key-not-real-0000000000")
@@ -210,13 +213,14 @@ func TestFlagsOverrideEnvironment(t *testing.T) {
 }
 
 func TestSlashCommandsInChat(t *testing.T) {
-	h := newHarness(t, "/help\n/approval readonly\n/approval bogus\n/model gpt-test\n/model\n/config\n/status\n/nope\n/key\n/exit\n")
+	h := newHarness(t, "/help\n/approval readonly\n/approval bogus\n/model gpt-test\n/model\n/config\n/status\n/procs\n/nope\n/key\n/exit\n")
 	if code := h.run("chat"); code != 0 {
 		t.Fatal(h.errb.String())
 	}
 	out := h.out.String()
 	for _, want := range []string{"/approval [mode]", "approval is now readonly", "unknown mode", "model is now gpt-test", "model: gpt-test",
-		"SCOUTCLAW_MODEL", "unknown command /nope", "/key needs an interactive terminal", "Bye from ScoutClaw"} {
+		"SCOUTCLAW_MODEL", "unknown command /nope", "/key needs an interactive terminal", "Bye from ScoutClaw",
+		"0 tokens in the conversation (compacts at 200000 tokens)", "SCOUTCLAW_COMPACT_AT", "no background processes", "/procs [stop <id>]"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
@@ -316,5 +320,53 @@ func TestUpdateCheckAndUpToDate(t *testing.T) {
 	h.run("update")
 	if !strings.Contains(h.out.String(), "up to date") {
 		t.Fatalf("%s", h.out.String())
+	}
+}
+
+func TestEditsModeThenDiffAndUndoInChat(t *testing.T) {
+	h := newHarness(t, "fix the port\n/diff\n/undo\n/diff\n/exit\n",
+		llm.Calls(llm.ToolCall{ID: "1", Name: "fs_read", Arguments: `{"path":"app.conf"}`}),
+		llm.Calls(llm.ToolCall{ID: "2", Name: "fs_patch", Arguments: `{"path":"app.conf","old_string":"port=80","new_string":"port=8080"}`}),
+		llm.Reply("fixed"),
+	)
+	ws := os.Getenv(config.EnvWorkspace)
+	conf := filepath.Join(ws, "app.conf")
+	os.WriteFile(conf, []byte("port=80\n"), 0o644)
+	if code := h.run("chat", "--approval", "edits"); code != 0 {
+		t.Fatalf("exit %d: %s %s", code, h.out.String(), h.errb.String())
+	}
+	out := h.out.String()
+	if strings.Contains(out, "allow?") {
+		t.Fatalf("edits mode must not prompt for a workspace edit:\n%s", out)
+	}
+	for _, want := range []string{"#1 patch", "+port=8080", "undid #1 patch", "no file changes recorded"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+	if b, _ := os.ReadFile(conf); string(b) != "port=80\n" {
+		t.Fatalf("undo did not restore the file: %q", b)
+	}
+}
+
+func TestBackgroundProcessesInChatStopOnExit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses the sleep command")
+	}
+	h := newHarness(t, "start a server\n/procs\n/procs stop p9\n/exit\n",
+		llm.Calls(llm.ToolCall{ID: "1", Name: "proc_start", Arguments: `{"command":"sleep","args":["30"],"name":"srv","wait_sec":1}`}),
+		llm.Reply("started"),
+	)
+	if code := h.run("chat", "--approval", "auto"); code != 0 {
+		t.Fatalf("exit %d: %s", code, h.errb.String())
+	}
+	out := h.out.String()
+	for _, want := range []string{"proc_start sleep 30", "p1 [srv]  running", "no background process \"p9\""} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(h.errb.String(), "stopped 1 background process(es)") {
+		t.Errorf("exiting must stop background processes; stderr:\n%s", h.errb.String())
 	}
 }

@@ -26,11 +26,15 @@ type ApprovalRequest struct {
 	Summary  string
 	Decision policy.Decision
 	Preview  string // diff for file edits
+	// SuggestedRule is the permission rule that "always in this project"
+	// would save; empty when that choice is not offered.
+	SuggestedRule string
 }
 
 type ApprovalResponse struct {
 	Approved bool
 	Remember bool // allow the same kind of medium-risk action for the rest of the session
+	Persist  bool // save SuggestedRule as an allow rule in the project's personal config
 }
 
 type Approver interface {
@@ -71,6 +75,8 @@ type Executor struct {
 	SessionID   string
 	ToolTimeout time.Duration
 	MaxOutput   int
+	// PersistRule saves an allow rule for the project; nil disables "always in this project".
+	PersistRule func(rule string) error
 
 	mu       sync.Mutex
 	allowed  map[string]bool // session-level approvals keyed by policy key
@@ -112,7 +118,7 @@ func (x *Executor) Run(ctx context.Context, call Call) Outcome {
 	d := x.Policy.Decide(call.Name, call.Input)
 	out.Decision = d
 	x.Audit.Log(audit.Event{SessionID: x.SessionID, Kind: "decision", Tool: call.Name, Data: map[string]any{
-		"call_id": call.ID, "risk": d.Risk.String(), "action": d.Action.String(), "reason": d.Reason, "forbidden": d.Forbidden}})
+		"call_id": call.ID, "risk": d.Risk.String(), "action": d.Action.String(), "reason": d.Reason, "forbidden": d.Forbidden, "rule": d.Rule}})
 
 	grant := tools.Grant{}
 	switch d.Action {
@@ -123,6 +129,9 @@ func (x *Executor) Run(ctx context.Context, call Call) Outcome {
 			break
 		}
 		req := ApprovalRequest{Tool: call.Name, Summary: Summarize(call), Decision: d}
+		if x.PersistRule != nil {
+			req.SuggestedRule = policy.SuggestRule(call.Name, call.Input, d)
+		}
 		if pv, ok := tool.(tools.Previewer); ok {
 			if p, err := pv.Preview(ctx, call.Input); err == nil {
 				req.Preview = p
@@ -132,7 +141,8 @@ func (x *Executor) Run(ctx context.Context, call Call) Outcome {
 		}
 		resp, err := x.Approver.Approve(ctx, req)
 		x.Audit.Log(audit.Event{SessionID: x.SessionID, Kind: "approval", Tool: call.Name, Data: map[string]any{
-			"call_id": call.ID, "approved": resp.Approved && err == nil, "remember": resp.Remember, "summary": Summarize(call)}})
+			"call_id": call.ID, "approved": resp.Approved && err == nil, "remember": resp.Remember, "persist": resp.Persist && req.SuggestedRule != "",
+			"summary": Summarize(call)}})
 		if err != nil {
 			return fail(tools.KindCancelled, "approval prompt aborted: "+err.Error())
 		}
@@ -142,6 +152,11 @@ func (x *Executor) Run(ctx context.Context, call Call) Outcome {
 		out.Approved = true
 		if resp.Remember && d.Risk == policy.Medium && d.Key != "" {
 			x.remember(d.Key)
+		}
+		if resp.Persist && req.SuggestedRule != "" {
+			if err := x.PersistRule(req.SuggestedRule); err != nil {
+				x.Audit.Log(audit.Event{SessionID: x.SessionID, Kind: "persist_rule_failed", Tool: call.Name, Data: map[string]any{"rule": req.SuggestedRule, "error": err.Error()}})
+			}
 		}
 	}
 	grant.OutsideWorkspace = d.Outside && (out.Approved || d.Action == policy.Allow)
@@ -216,9 +231,9 @@ func (x *Executor) render(res tools.Result) string {
 		status = fmt.Sprintf("failed (exit %d)", res.ExitCode)
 	}
 	body := x.Redactor.Redact(res.Output)
-	if x.MaxOutput > 0 && len(body) > x.MaxOutput {
-		half := x.MaxOutput / 2
-		body = body[:half] + fmt.Sprintf("\n... [%d bytes omitted by ScoutClaw] ...\n", len(body)-x.MaxOutput) + body[len(body)-half:]
+	if limit := max(x.MaxOutput, res.OutputLimit); x.MaxOutput > 0 && len(body) > limit {
+		half := limit / 2
+		body = body[:half] + fmt.Sprintf("\n... [%d bytes omitted by ScoutClaw] ...\n", len(body)-limit) + body[len(body)-half:]
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "status: %s", status)
@@ -330,8 +345,55 @@ func Summarize(c Call) string {
 			s = s[:200] + "…"
 		}
 		return map[string]string{"shell_script": "bash -c ", "shell_powershell": "pwsh -c "}[c.Name] + fmt.Sprintf("%q", s)
-	case "fs_write", "fs_patch", "fs_read", "fs_stat", "fs_list":
-		return c.Name + " " + str("path")
+	case "fs_write", "fs_patch", "fs_lines", "fs_read", "fs_stat", "fs_list", "fs_mkdir", "fs_changes":
+		return strings.TrimSpace(c.Name + " " + str("path"))
+	case "fs_copy", "fs_move":
+		return fmt.Sprintf("%s %s -> %s", c.Name, str("src"), str("dest"))
+	case "fs_delete":
+		if r, _ := m["recursive"].(bool); r {
+			return "fs_delete -r " + str("path")
+		}
+		return "fs_delete " + str("path")
+	case "fs_undo":
+		n, _ := m["steps"].(float64)
+		return strings.TrimSpace(fmt.Sprintf("fs_undo %d %s", max(int(n), 1), str("path")))
+	case "proc_start":
+		parts := []string{"proc_start", str("command")}
+		if a, ok := m["args"].([]any); ok {
+			for _, v := range a {
+				parts = append(parts, fmt.Sprint(v))
+			}
+		}
+		return strings.Join(parts, " ")
+	case "proc_output", "proc_stop":
+		return c.Name + " " + str("id")
+	case "fs_apply_patch":
+		var files []string
+		for _, l := range strings.Split(str("patch"), "\n") {
+			for _, prefix := range []string{"*** Add File: ", "*** Update File: ", "*** Delete File: ", "+++ b/"} {
+				if p, ok := strings.CutPrefix(l, prefix); ok {
+					files = append(files, strings.TrimSpace(p))
+				}
+			}
+		}
+		return "fs_apply_patch " + strings.Join(files, " ")
+	case "project_info":
+		return strings.TrimSpace("project_info " + str("path"))
+	case "fs_glob":
+		return strings.TrimSpace("fs_glob " + str("pattern") + " " + str("path"))
+	case "fs_grep":
+		return strings.TrimSpace(fmt.Sprintf("fs_grep %q %s", str("pattern"), str("path")))
+	case "fs_read_many":
+		var paths []string
+		if fs, ok := m["files"].([]any); ok {
+			for _, v := range fs {
+				if f, ok := v.(map[string]any); ok {
+					p, _ := f["path"].(string)
+					paths = append(paths, p)
+				}
+			}
+		}
+		return "fs_read_many " + strings.Join(paths, " ")
 	case "fs_search":
 		return fmt.Sprintf("fs_search %s %s %s", str("path"), str("pattern"), str("name_glob"))
 	case "net_dns":

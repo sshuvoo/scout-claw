@@ -20,22 +20,32 @@ func foldCase(s string) string {
 
 // Scope defines the workspace and resolves paths against it.
 type Scope struct {
-	Root string // absolute, symlink-resolved
+	Root  string   // absolute, symlink-resolved
+	Extra []string // additional writable directories from config (permissions.additionalDirectories)
 }
 
-func NewScope(root string) Scope {
+func NewScope(root string, extra ...string) Scope {
 	abs, err := filepath.Abs(root)
 	if err != nil {
 		abs = root
 	}
-	return Scope{Root: realPath(abs)}
+	s := Scope{Root: realPath(abs)}
+	for _, d := range extra {
+		if a, err := filepath.Abs(d); err == nil {
+			s.Extra = append(s.Extra, realPath(a))
+		}
+	}
+	return s
 }
 
 // Resolve turns p into an absolute, cleaned path. Relative paths are taken
 // relative to base (or the workspace root when base is empty); "~" expands to
 // the home directory. Symlinks are resolved so a link cannot smuggle a path
 // out of the workspace.
-func (s Scope) Resolve(p, base string) string {
+func (s Scope) Resolve(p, base string) string { return realPath(s.absolute(p, base)) }
+
+// absolute is Resolve before symlinks are resolved.
+func (s Scope) absolute(p, base string) string {
 	if p == "~" || strings.HasPrefix(p, "~/") || (runtime.GOOS == "windows" && strings.HasPrefix(p, `~\`)) {
 		if home, err := os.UserHomeDir(); err == nil {
 			p = filepath.Join(home, strings.TrimPrefix(p, "~"))
@@ -50,7 +60,17 @@ func (s Scope) Resolve(p, base string) string {
 		}
 		p = filepath.Join(base, p)
 	}
-	return realPath(filepath.Clean(p))
+	return filepath.Clean(p)
+}
+
+// ResolveNoFollow is Resolve without following a symlink in the last path
+// element, so moving or deleting a link acts on the link, not its target.
+func (s Scope) ResolveNoFollow(p, base string) string {
+	a := s.absolute(p, base)
+	if filepath.Dir(a) == a {
+		return a
+	}
+	return filepath.Join(realPath(filepath.Dir(a)), filepath.Base(a))
 }
 
 // posixToWindows maps a rooted path without a drive letter, as Git Bash and
@@ -73,13 +93,16 @@ func posixToWindows(p, volume string) string {
 
 func isASCIILetter(c byte) bool { return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' }
 
-// Contains reports whether the already-resolved absolute path is inside the workspace.
+// Contains reports whether the already-resolved absolute path is inside the
+// workspace or one of the additional directories.
 func (s Scope) Contains(abs string) bool {
-	rel, err := filepath.Rel(s.Root, abs)
-	if err != nil {
-		return false
+	for _, root := range append([]string{s.Root}, s.Extra...) {
+		rel, err := filepath.Rel(root, abs)
+		if err == nil && (rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))) {
+			return true
+		}
 	}
-	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+	return false
 }
 
 // realPath resolves symlinks on the longest existing prefix of p, so it works

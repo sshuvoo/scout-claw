@@ -139,7 +139,11 @@ func (u *UI) ToolEnd(o executor.Outcome) {
 		badge = u.c(cRed, fmt.Sprintf("  ✗ %s (exit %d)", orStr(string(r.Kind), "failed"), r.ExitCode))
 	}
 	if o.Decision.Risk != policy.Low && o.Approved {
-		badge += u.c(cGray, " ["+o.Decision.Risk.String()+" risk, approved]")
+		how := "approved"
+		if o.Decision.Rule != "" {
+			how = "allowed by rule " + strings.SplitN(strings.TrimPrefix(o.Decision.Rule, "allow "), " (", 2)[0]
+		}
+		badge += u.c(cGray, " ["+o.Decision.Risk.String()+" risk, "+how+"]")
 	}
 	fmt.Fprintf(u.Out, "%s %s\n", badge, u.c(cGray, o.Duration.Round(time.Millisecond).String()))
 	out := strings.TrimRight(u.Redactor.Redact(r.Output), "\n")
@@ -200,6 +204,10 @@ func (u *UI) Approve(ctx context.Context, req executor.ApprovalRequest) (executo
 	if d.Risk == policy.Medium && d.Key != "" {
 		opts += " / [a]lways for this session"
 	}
+	if req.SuggestedRule != "" {
+		opts += " / [p] always in this project"
+		fmt.Fprintf(u.Out, "   %s\n", u.c(cGray, "[p] saves the rule "+req.SuggestedRule+" to .scout/config.local.json"))
+	}
 	fmt.Fprintf(u.Out, "   allow? %s: ", opts)
 	line, err := u.In.ReadLine(ctx)
 	if err != nil {
@@ -211,6 +219,11 @@ func (u *UI) Approve(ctx context.Context, req executor.ApprovalRequest) (executo
 	case "a", "always":
 		if d.Risk == policy.Medium && d.Key != "" {
 			return executor.ApprovalResponse{Approved: true, Remember: true}, nil
+		}
+		return executor.ApprovalResponse{Approved: true}, nil
+	case "p", "project":
+		if req.SuggestedRule != "" {
+			return executor.ApprovalResponse{Approved: true, Persist: true}, nil
 		}
 		return executor.ApprovalResponse{Approved: true}, nil
 	}

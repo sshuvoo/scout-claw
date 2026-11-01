@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/openai/openai-go/v3"
@@ -20,6 +21,9 @@ import (
 type OpenAI struct {
 	client openai.Client
 	model  string
+	// noCompaction is set once the endpoint rejects context_management (some
+	// OpenAI-compatible servers do), so later requests stop sending it.
+	noCompaction atomic.Bool
 }
 
 // NewOpenAI builds the provider. baseURL may be empty (SDK default / OPENAI_BASE_URL).
@@ -41,6 +45,30 @@ func (o *OpenAI) Name() string  { return "openai" }
 func (o *OpenAI) Model() string { return o.model }
 
 func (o *OpenAI) Generate(ctx context.Context, req Request) (*Response, error) {
+	compact := req.CompactAt > 0 && !o.noCompaction.Load()
+	out, err := o.generate(ctx, req, compact)
+	if compact && rejectsCompaction(err) {
+		o.noCompaction.Store(true)
+		out, err = o.generate(ctx, req, false)
+	}
+	return out, err
+}
+
+// CompactionSupported reports whether the endpoint has accepted (or not yet
+// refused) context_management.
+func (o *OpenAI) CompactionSupported() bool { return !o.noCompaction.Load() }
+
+// rejectsCompaction recognises a 400 caused by the context_management field.
+func rejectsCompaction(err error) bool {
+	var le *Error
+	if !errors.As(err, &le) || le.Kind != ErrBadRequest {
+		return false
+	}
+	msg := strings.ToLower(le.Err.Error())
+	return strings.Contains(msg, "context_management") || strings.Contains(msg, "compact")
+}
+
+func (o *OpenAI) generate(ctx context.Context, req Request, compact bool) (*Response, error) {
 	params := responses.ResponseNewParams{
 		Model:        openai.ChatModel(o.model),
 		Instructions: openai.String(req.Instructions),
@@ -56,6 +84,9 @@ func (o *OpenAI) Generate(ctx context.Context, req Request) (*Response, error) {
 		items = append(items, responses.ResponseInputItemParamOfMessage(req.UserText, responses.EasyInputMessageRoleUser))
 	}
 	params.Input = responses.ResponseNewParamsInputUnion{OfInputItemList: items}
+	if compact {
+		params.ContextManagement = []responses.ResponseNewParamsContextManagement{{Type: "compaction", CompactThreshold: openai.Int(req.CompactAt)}}
+	}
 	if req.PreviousID != "" {
 		params.PreviousResponseID = openai.String(req.PreviousID)
 	}
@@ -79,9 +110,12 @@ func (o *OpenAI) Generate(ctx context.Context, req Request) (*Response, error) {
 		Usage: Usage{InputTokens: resp.Usage.InputTokens, OutputTokens: resp.Usage.OutputTokens},
 	}
 	for _, item := range resp.Output {
-		if item.Type == "function_call" {
+		switch item.Type {
+		case "function_call":
 			fc := item.AsFunctionCall()
 			out.ToolCalls = append(out.ToolCalls, ToolCall{ID: fc.CallID, Name: fc.Name, Arguments: fc.Arguments})
+		case "compaction":
+			out.Compacted = true
 		}
 	}
 	if resp.Status == responses.ResponseStatusIncomplete {
