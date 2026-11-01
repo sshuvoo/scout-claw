@@ -1,7 +1,14 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"sync"
+	"time"
+
+	"github.com/spf13/cobra"
+
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,6 +73,9 @@ func TestTrustPrompt(t *testing.T) {
 				if !strings.Contains(h.errb.String(), w) {
 					t.Errorf("stderr missing %q:\n%s", w, h.errb.String())
 				}
+			}
+			if h.app.input != nil && h.app.input.Started() {
+				t.Fatal("answering the trust prompt must not leave a stdin reader running")
 			}
 			_, err := os.Stat(filepath.Join(os.Getenv("HOME"), ".scout", "trusted.json"))
 			if (err == nil) != tt.trusted {
@@ -254,5 +264,61 @@ func TestResultLineNamesTheAllowingRule(t *testing.T) {
 	}
 	if !strings.Contains(h.out.String(), "[medium risk, allowed by rule fs_write]") || strings.Contains(h.out.String(), "allow? ") {
 		t.Fatalf("output:\n%s", h.out.String())
+	}
+}
+
+// countingReader records reads; it is used to prove nothing reads stdin early.
+type countingReader struct {
+	mu    sync.Mutex
+	reads int
+	r     io.Reader
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	c.mu.Lock()
+	c.reads++
+	c.mu.Unlock()
+	return c.r.Read(p)
+}
+
+func (c *countingReader) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.reads
+}
+
+// Regression: v0.8.0 created a line reader before the full-screen UI started;
+// its goroutine kept reading stdin and stole about half of all keystrokes.
+func TestCreatingAUIDoesNotReadStdin(t *testing.T) {
+	in := &countingReader{r: strings.NewReader("hello\n")}
+	a := &App{In: in, Out: io.Discard, Err: io.Discard}
+	ui := a.newUI()
+	time.Sleep(50 * time.Millisecond)
+	if n := in.count(); n != 0 || ui.In.Started() {
+		t.Fatalf("stdin read %d time(s) before any prompt; started=%v", n, ui.In.Started())
+	}
+	line, err := ui.In.ReadLine(context.Background())
+	if err != nil || line != "hello" || !ui.In.Started() {
+		t.Fatalf("ReadLine = %q, %v", line, err)
+	}
+}
+
+func TestTrustAnswerReadsOneLineAndLeavesNoReader(t *testing.T) {
+	in := strings.NewReader("yes\r\nnext line\n")
+	a := &App{In: in, Out: io.Discard, Err: io.Discard}
+	ui := a.newUI()
+	got, err := a.readAnswer(&cobra.Command{}, ui)
+	if err != nil || got != "yes" {
+		t.Fatalf("readAnswer = %q, %v", got, err)
+	}
+	if ui.In.Started() {
+		t.Fatal("the trust prompt must not leave a line reader running")
+	}
+	rest, _ := io.ReadAll(in)
+	if string(rest) != "next line\n" {
+		t.Fatalf("readAnswer consumed more than one line; left %q", rest)
+	}
+	if _, err := a.readAnswer(&cobra.Command{}, ui); err != nil && !strings.Contains(err.Error(), "end of input") {
+		t.Fatalf("EOF: %v", err)
 	}
 }

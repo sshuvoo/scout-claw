@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -331,15 +332,30 @@ func clipLines(s string, n int) string {
 // prevents cancellation and prompts never race each other. In secret mode it
 // echoes "*" per character (the terminal itself is switched to non-canonical,
 // no-echo mode by the caller) and handles backspace and pasted escape codes.
+//
+// The goroutine starts on the first read, not in NewInput: once it runs it
+// keeps reading stdin, and a second reader (the full-screen UI) would then
+// lose every other keystroke to it.
 type Input struct {
-	lines  chan string
-	done   chan struct{}
-	secret atomic.Bool
-	out    io.Writer
+	lines   chan string
+	done    chan struct{}
+	secret  atomic.Bool
+	out     io.Writer
+	r       io.Reader
+	once    sync.Once
+	started atomic.Bool
 }
 
 func NewInput(r io.Reader, out io.Writer) *Input {
-	in := &Input{lines: make(chan string), done: make(chan struct{}), out: out}
+	return &Input{lines: make(chan string), done: make(chan struct{}), out: out, r: r}
+}
+
+// Started reports whether the reading goroutine is running.
+func (in *Input) Started() bool { return in.started.Load() }
+
+func (in *Input) start() {
+	in.started.Store(true)
+	r := in.r
 	go func() {
 		defer close(in.done)
 		br := bufio.NewReader(r)
@@ -381,7 +397,6 @@ func NewInput(r io.Reader, out io.Writer) *Input {
 			}
 		}
 	}()
-	return in
 }
 
 // ReadSecret reads one line with "*" echo. The caller must have put the terminal
@@ -395,6 +410,7 @@ func (in *Input) ReadSecret(ctx context.Context) (string, error) {
 var errEOF = errors.New("end of input")
 
 func (in *Input) ReadLine(ctx context.Context) (string, error) {
+	in.once.Do(in.start)
 	select {
 	case l := <-in.lines:
 		return l, nil
