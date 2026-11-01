@@ -300,9 +300,71 @@ func TestWithin(t *testing.T) {
 func TestEveryFileToolHasAPolicy(t *testing.T) {
 	e, _ := engine(t, config.ApprovalAsk)
 	for _, tool := range []string{"fs_list", "fs_read", "fs_stat", "fs_search", "fs_changes", "fs_write", "fs_patch", "fs_lines",
-		"fs_mkdir", "fs_copy", "fs_move", "fs_delete", "fs_undo", "fs_glob", "fs_grep", "fs_read_many"} {
+		"fs_mkdir", "fs_copy", "fs_move", "fs_delete", "fs_undo", "fs_glob", "fs_grep", "fs_read_many", "fs_apply_patch", "project_info"} {
 		if d := e.Classify(tool, json.RawMessage(`{}`)); d.Forbidden && strings.Contains(d.Reason, "has no policy") {
 			t.Errorf("%s has no policy", tool)
 		}
+	}
+}
+
+func TestPatchPaths(t *testing.T) {
+	tests := []struct {
+		name    string
+		patch   string
+		paths   []string
+		deleted []string
+	}{
+		{"codex", "*** Begin Patch\n*** Add File: a\n+x\n*** Update File: b\n*** Move to: c\n*** Delete File: d\n*** End Patch", []string{"a", "b", "c", "d"}, []string{"d"}},
+		{"unified", "--- a/x.go\n+++ b/x.go\n@@ -1 +1 @@\n-a\n+b\n--- /dev/null\n+++ b/new.go\n--- a/old.go\n+++ /dev/null\n", []string{"x.go", "x.go", "new.go", "old.go"}, []string{"old.go"}},
+		{"removed sql comment is not a file header", "--- a/q.sql\n+++ b/q.sql\n@@ -1 +1 @@\n--- old\n+-- new\n", []string{"q.sql", "q.sql"}, nil},
+		{"crlf", "*** Begin Patch\r\n*** Delete File: z\r\n*** End Patch\r\n", []string{"z"}, []string{"z"}},
+	}
+	for _, tt := range tests {
+		paths, deleted := patchPaths(tt.patch)
+		if strings.Join(paths, ",") != strings.Join(tt.paths, ",") {
+			t.Errorf("%s: paths = %v, want %v", tt.name, paths, tt.paths)
+		}
+		if len(deleted) != len(tt.deleted) {
+			t.Errorf("%s: deleted = %v, want %v", tt.name, deleted, tt.deleted)
+		}
+		for _, d := range tt.deleted {
+			if !deleted[d] {
+				t.Errorf("%s: %s should be marked deleted", tt.name, d)
+			}
+		}
+	}
+}
+
+func TestApplyPatchAndProjectInfoClassification(t *testing.T) {
+	j := func(patch string) json.RawMessage { b, _ := json.Marshal(map[string]string{"patch": patch}); return b }
+	tests := []struct {
+		name      string
+		mode      config.Approval
+		patch     string
+		risk      Risk
+		forbidden bool
+		action    Action
+		outside   bool
+	}{
+		{"workspace edit asks in ask mode", config.ApprovalAsk, "*** Begin Patch\n*** Update File: a.go\n-a\n+b\n*** End Patch", Medium, false, Ask, false},
+		{"workspace edit runs in edits mode", config.ApprovalEdits, "*** Begin Patch\n*** Update File: a.go\n-a\n+b\n*** Add File: b.go\n+x\n*** End Patch", Medium, false, Allow, false},
+		{"a delete still asks in edits mode", config.ApprovalEdits, "*** Begin Patch\n*** Delete File: a.go\n*** End Patch", Medium, false, Ask, false},
+		{"outside the workspace is high risk", config.ApprovalAuto, "*** Begin Patch\n*** Add File: ../x.go\n+x\n*** End Patch", High, false, Ask, true},
+		{"credential file is forbidden", config.ApprovalAuto, "*** Begin Patch\n*** Update File: ~/.ssh/id_rsa\n-a\n+b\n*** End Patch", High, true, Deny, false},
+		{"deleting .git is forbidden", config.ApprovalAuto, "--- a/.git\n+++ /dev/null\n", High, true, Deny, false},
+		{"readonly denies", config.ApprovalReadOnly, "*** Begin Patch\n*** Add File: a\n+x\n*** End Patch", Medium, false, Deny, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e, _ := engine(t, tt.mode)
+			d := e.Decide("fs_apply_patch", j(tt.patch))
+			if d.Risk != tt.risk || d.Forbidden != tt.forbidden || d.Action != tt.action || d.Outside != tt.outside {
+				t.Fatalf("got risk=%s forbidden=%v action=%s outside=%v (%s)", d.Risk, d.Forbidden, d.Action, d.Outside, d.Reason)
+			}
+		})
+	}
+	e, _ := engine(t, config.ApprovalReadOnly)
+	if d := e.Decide("project_info", json.RawMessage(`{}`)); d.Action != Allow {
+		t.Fatalf("project_info is read-only and must run even in readonly mode: %+v", d)
 	}
 }

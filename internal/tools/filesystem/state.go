@@ -177,6 +177,16 @@ func (s *State) record(c Change) Change {
 	return c
 }
 
+// last returns the most recent journal entry.
+func (s *State) last() Change {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.changes) == 0 {
+		return Change{}
+	}
+	return s.changes[len(s.changes)-1]
+}
+
 // Changes returns the journal entries that are still in effect (not undone, not undo markers).
 func (s *State) Changes() []Change {
 	s.mu.Lock()

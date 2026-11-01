@@ -289,6 +289,9 @@ func TestSummarizeFileTools(t *testing.T) {
 		{"fs_undo", map[string]any{}, "fs_undo 1"},
 		{"fs_undo", map[string]any{"steps": 3, "path": "src"}, "fs_undo 3 src"},
 		{"fs_glob", map[string]any{"pattern": "*.go"}, "fs_glob *.go"},
+		{"fs_apply_patch", map[string]any{"patch": "*** Begin Patch\n*** Update File: a.go\n-x\n+y\n*** Add File: b.go\n+z\n*** End Patch"}, "fs_apply_patch a.go b.go"},
+		{"fs_apply_patch", map[string]any{"patch": "--- a/c.go\n+++ b/c.go\n"}, "fs_apply_patch c.go"},
+		{"project_info", map[string]any{}, "project_info"},
 		{"fs_grep", map[string]any{"pattern": "TODO", "path": "src"}, `fs_grep "TODO" src`},
 		{"fs_read_many", map[string]any{"files": []map[string]any{{"path": "a"}, {"path": "b"}}}, "fs_read_many a b"},
 	}

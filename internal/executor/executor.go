@@ -342,6 +342,18 @@ func Summarize(c Call) string {
 	case "fs_undo":
 		n, _ := m["steps"].(float64)
 		return strings.TrimSpace(fmt.Sprintf("fs_undo %d %s", max(int(n), 1), str("path")))
+	case "fs_apply_patch":
+		var files []string
+		for _, l := range strings.Split(str("patch"), "\n") {
+			for _, prefix := range []string{"*** Add File: ", "*** Update File: ", "*** Delete File: ", "+++ b/"} {
+				if p, ok := strings.CutPrefix(l, prefix); ok {
+					files = append(files, strings.TrimSpace(p))
+				}
+			}
+		}
+		return "fs_apply_patch " + strings.Join(files, " ")
+	case "project_info":
+		return strings.TrimSpace("project_info " + str("path"))
 	case "fs_glob":
 		return strings.TrimSpace("fs_glob " + str("pattern") + " " + str("path"))
 	case "fs_grep":

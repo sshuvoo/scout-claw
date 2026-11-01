@@ -42,6 +42,7 @@ type Decision struct {
 	Recovery  string // how to undo, if known (shown for high risk)
 	Key       string // stable key for "allow for this session" (medium risk only)
 	Outside   bool   // touches paths outside the workspace
+	Deletes   bool   // removes files; the "edits" approval mode never auto-approves this
 }
 
 type Engine struct {
@@ -64,7 +65,7 @@ func (e *Engine) Decide(tool string, input json.RawMessage) Decision {
 		d.Reason = "approval policy is readonly; " + d.Reason
 	case d.Risk == Medium && e.Mode == config.ApprovalAuto:
 		d.Action = Allow
-	case d.Risk == Medium && e.Mode == config.ApprovalEdits && fileEditTools[tool] && !d.Outside:
+	case d.Risk == Medium && e.Mode == config.ApprovalEdits && fileEditTools[tool] && !d.Outside && !d.Deletes:
 		d.Action = Allow
 	default:
 		d.Action = Ask
@@ -79,6 +80,10 @@ func (e *Engine) Classify(tool string, input json.RawMessage) Decision {
 		return e.classifyFSRead(input)
 	case "fs_read_many":
 		return e.classifyReadMany(input)
+	case "fs_apply_patch":
+		return e.classifyApplyPatch(input)
+	case "project_info":
+		return e.classifyFSRead(input)
 	case "fs_write", "fs_patch", "fs_lines", "fs_mkdir":
 		return e.classifyFSWrite(tool, input)
 	case "fs_copy", "fs_move":
@@ -130,7 +135,80 @@ func (e *Engine) classifyReadMany(input json.RawMessage) Decision {
 
 // fileEditTools are auto-approved inside the workspace in the "edits" approval mode.
 var fileEditTools = map[string]bool{"fs_write": true, "fs_patch": true, "fs_lines": true, "fs_mkdir": true,
-	"fs_copy": true, "fs_move": true, "fs_undo": true}
+	"fs_copy": true, "fs_move": true, "fs_undo": true, "fs_apply_patch": true}
+
+// patchPaths extracts every path a patch touches (both formats accepted by
+// fs_apply_patch) and which of them it deletes.
+func patchPaths(patch string) (paths []string, deleted map[string]bool) {
+	deleted = map[string]bool{}
+	lines := strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n")
+	strip := func(p string) string {
+		p = strings.TrimSpace(p)
+		if i := strings.IndexByte(p, '\t'); i >= 0 {
+			p = p[:i]
+		}
+		if strings.HasPrefix(p, "a/") || strings.HasPrefix(p, "b/") {
+			p = p[2:]
+		}
+		return p
+	}
+	for i, l := range lines {
+		for _, prefix := range []string{"*** Add File: ", "*** Update File: ", "*** Move to: ", "*** Delete File: "} {
+			if p, ok := strings.CutPrefix(l, prefix); ok {
+				paths = append(paths, strings.TrimSpace(p))
+				if prefix == "*** Delete File: " {
+					deleted[strings.TrimSpace(p)] = true
+				}
+			}
+		}
+		if strings.HasPrefix(l, "--- ") && i+1 < len(lines) && strings.HasPrefix(lines[i+1], "+++ ") {
+			from, to := strip(l[4:]), strip(lines[i+1][4:])
+			for _, p := range []string{from, to} {
+				if p != "/dev/null" {
+					paths = append(paths, p)
+				}
+			}
+			if to == "/dev/null" && from != "/dev/null" {
+				deleted[from] = true
+			}
+		}
+	}
+	return paths, deleted
+}
+
+func (e *Engine) classifyApplyPatch(input json.RawMessage) Decision {
+	var in struct {
+		Patch string `json:"patch"`
+	}
+	_ = json.Unmarshal(input, &in)
+	paths, deleted := patchPaths(in.Patch)
+	if len(paths) == 0 {
+		return Decision{Risk: Medium, Reason: "file modification", Key: "fs_apply_patch:workspace"}
+	}
+	worst, outside := Decision{Risk: Low}, false
+	for _, p := range paths {
+		var pd Decision
+		if deleted[p] {
+			in, _ := json.Marshal(map[string]string{"path": p})
+			pd = e.classifyDelete(in)
+		} else {
+			pd = e.classifyWritePath("fs_apply_patch", e.Scope.Resolve(p, ""))
+		}
+		outside = outside || pd.Outside
+		worst = higher(worst, pd)
+	}
+	d := Decision{Risk: worst.Risk, Forbidden: worst.Forbidden, Outside: outside, Deletes: len(deleted) > 0,
+		Reason:   fmt.Sprintf("patch changes %d file(s) inside the workspace", len(paths)),
+		Effects:  "applies a patch to: " + strings.Join(paths, ", "),
+		Recovery: "previous contents are backed up and deleted files go to the session trash; fs_undo reverts the patch"}
+	if worst.Forbidden || worst.Risk == High {
+		d.Reason = fmt.Sprintf("patch changes %d file(s); %s", len(paths), worst.Reason)
+	}
+	if d.Risk == Medium && !d.Deletes {
+		d.Key = "fs_apply_patch:workspace"
+	}
+	return d
+}
 
 func (e *Engine) classifyFSWrite(tool string, input json.RawMessage) Decision {
 	var in struct {
@@ -213,7 +291,7 @@ func (e *Engine) classifyDelete(input json.RawMessage) Decision {
 	case in.Recursive:
 		return Decision{Risk: High, Reason: "recursively deletes a directory inside the workspace", Effects: "removes " + abs + " and everything in it", Recovery: recovery}
 	}
-	return Decision{Risk: Medium, Reason: "deletes a file inside the workspace", Effects: "removes " + abs, Recovery: recovery, Key: "fs_delete:workspace"}
+	return Decision{Risk: Medium, Reason: "deletes a file inside the workspace", Effects: "removes " + abs, Recovery: recovery, Key: "fs_delete:workspace", Deletes: true}
 }
 
 // within reports whether child is inside parent (or equal to it).

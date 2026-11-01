@@ -31,7 +31,7 @@ func TestFSOptions(t *testing.T) {
 func TestRegistryHasEveryFileTool(t *testing.T) {
 	reg, _ := New(Options{Scope: policy.NewScope(t.TempDir()), MaxOutput: 4096, Tracker: &verify.Tracker{}})
 	for _, name := range []string{"fs_list", "fs_read", "fs_stat", "fs_search", "fs_write", "fs_patch", "fs_lines",
-		"fs_mkdir", "fs_copy", "fs_move", "fs_delete", "fs_changes", "fs_undo", "fs_glob", "fs_grep", "fs_read_many"} {
+		"fs_mkdir", "fs_copy", "fs_move", "fs_delete", "fs_changes", "fs_undo", "fs_glob", "fs_grep", "fs_read_many", "fs_apply_patch", "project_info"} {
 		if _, ok := reg.Get(name); !ok {
 			t.Errorf("%s is not registered", name)
 		}

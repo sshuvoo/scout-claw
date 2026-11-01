@@ -183,6 +183,8 @@ func (f FS) Tools() []tools.Tool {
 			PreviewFn: f.previewPatch,
 		},
 		f.linesTool(),
+		f.applyPatchTool(),
+		f.projectTool(),
 	}, append(f.manageTools(), f.searchTools()...)...)
 }
 

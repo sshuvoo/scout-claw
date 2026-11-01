@@ -124,8 +124,10 @@ Chat/interactive tips: Ctrl-C cancels the running task (children are terminated)
 
 Tools exposed to the model (all go through the same pipeline):
 
-- **Filesystem (read):** `fs_list`, `fs_read` (line ranges, tail mode), `fs_stat`, `fs_search` (regex + name glob).
+- **Filesystem (read):** `fs_list`, `fs_read` (line ranges, tail mode), `fs_read_many` (several files in one call), `fs_stat`, `fs_glob` (file patterns, newest first), `fs_grep` (regex or fixed-string search with context, file types and files/count output). Searches respect `.gitignore` and skip binary and credential files.
 - **Filesystem (edit):** `fs_write` (create or overwrite), `fs_patch` (exact-text replacement; `edits[]` applies several to one file atomically), `fs_lines` (insert, replace or delete by line number, each guarded by the expected current text), `fs_mkdir`, `fs_copy`, `fs_move`, `fs_delete`. Every edit shows a diff (or a description) before approval, keeps a backup and writes atomically. A file must have been read with `fs_read` before it can be edited, and an edit is refused if the file changed since that read. BOM, CRLF/LF line endings, the trailing newline and file mode are kept. `fs_delete` and anything replaced by an overwrite go to a per-session trash in `SCOUTCLAW_STATE_DIR/trash`, never `unlink`.
+- **Multi-file patches:** `fs_apply_patch` applies one patch that adds, updates, renames and deletes files atomically (all or nothing, rolled back on failure). It accepts the `*** Begin Patch` format of OpenAI's Codex CLI and standard unified diffs; hunks are found by context, tolerating small whitespace differences.
+- **Project discovery:** `project_info` reads manifests (go.mod, package.json, pyproject.toml, Cargo.toml, Maven/Gradle, .NET, Ruby, PHP) and reports the build/test/lint/format commands, package manager, Makefile targets, CI workflows, instruction files (AGENTS.md, CONTRIBUTING.md, …), git branch and nested projects. It never runs anything.
 - **Change journal:** `fs_changes` lists this session's file changes with a combined diff per file; `fs_undo` reverts the latest ones (and refuses if a file was changed again afterwards). In chat: `/diff` and `/undo [n]`.
 - **Shell:** `shell_exec` (one executable + argument array, **no shell**), `shell_script` (bash: the system bash on Linux/macOS, Git Bash on Windows; always high risk), `shell_powershell` (Windows only: PowerShell 7, falling back to Windows PowerShell 5.1; always high risk). Override discovery with `SCOUT_BASH_PATH` / `SCOUT_POWERSHELL_PATH`; `scout doctor` shows what was found.
 - **System (Linux):** `sys_info` (OS, kernel, load, memory, swap, disk and inode usage), `process_list` (CPU/memory top, secrets in command lines masked), `env_list` (secret values masked), `dev_runtimes`. Service state and logs use `shell_exec` with `systemctl status` / `journalctl`.
@@ -143,7 +145,7 @@ Tools exposed to the model (all go through the same pipeline):
 | High | writes outside the workspace, `rm -r`, `systemctl restart`, `apt`, `git push`, `sudo`, firewall/permission changes, any `shell_script` / `shell_powershell` | asks (y/n only) | asks | denied |
 | Refused | `rm -rf /` or `~`, `mkfs`/`dd` to devices, killing PID 1, piping downloads into a shell, reading SSH/GPG/cloud credential files and `/etc/shadow`; on Windows/macOS also `diskpart`/`format`/`diskutil erase*`, deleting shadow copies, `iex` of downloaded content, encoded PowerShell, killing critical system processes | never runs | never | never |
 
-`edits` behaves like `ask`, except that medium-risk file edits inside the workspace (`fs_write`, `fs_patch`, `fs_lines`, `fs_mkdir`, `fs_copy`, `fs_move`, `fs_undo`) run without a prompt. Deletes, shell commands and anything outside the workspace still ask.
+`edits` behaves like `ask`, except that medium-risk file edits inside the workspace (`fs_write`, `fs_patch`, `fs_lines`, `fs_apply_patch`, `fs_mkdir`, `fs_copy`, `fs_move`, `fs_undo`) run without a prompt; a patch that deletes files still asks. Deletes, shell commands and anything outside the workspace still ask.
 
 Further guarantees:
 
