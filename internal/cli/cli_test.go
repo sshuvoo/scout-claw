@@ -318,3 +318,29 @@ func TestUpdateCheckAndUpToDate(t *testing.T) {
 		t.Fatalf("%s", h.out.String())
 	}
 }
+
+func TestEditsModeThenDiffAndUndoInChat(t *testing.T) {
+	h := newHarness(t, "fix the port\n/diff\n/undo\n/diff\n/exit\n",
+		llm.Calls(llm.ToolCall{ID: "1", Name: "fs_read", Arguments: `{"path":"app.conf"}`}),
+		llm.Calls(llm.ToolCall{ID: "2", Name: "fs_patch", Arguments: `{"path":"app.conf","old_string":"port=80","new_string":"port=8080"}`}),
+		llm.Reply("fixed"),
+	)
+	ws := os.Getenv(config.EnvWorkspace)
+	conf := filepath.Join(ws, "app.conf")
+	os.WriteFile(conf, []byte("port=80\n"), 0o644)
+	if code := h.run("chat", "--approval", "edits"); code != 0 {
+		t.Fatalf("exit %d: %s %s", code, h.out.String(), h.errb.String())
+	}
+	out := h.out.String()
+	if strings.Contains(out, "allow?") {
+		t.Fatalf("edits mode must not prompt for a workspace edit:\n%s", out)
+	}
+	for _, want := range []string{"#1 patch", "+port=8080", "undid #1 patch", "no file changes recorded"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+	if b, _ := os.ReadFile(conf); string(b) != "port=80\n" {
+		t.Fatalf("undo did not restore the file: %q", b)
+	}
+}

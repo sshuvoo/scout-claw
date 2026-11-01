@@ -227,3 +227,74 @@ func TestCancelledContextStopsToolAndDoesNotCountAsFailure(t *testing.T) {
 		t.Fatal("cancellation must not count as a failure")
 	}
 }
+
+func TestOutputLimitRaisesTheCapPerResult(t *testing.T) {
+	e := newEnv(t, config.ApprovalAsk)
+	big := strings.Repeat("x", 10000)
+	tests := []struct {
+		name      string
+		res       tools.Result
+		truncated bool
+	}{
+		{"default cap applies", tools.Result{Output: big}, true},
+		{"larger per-result limit keeps everything", tools.Result{Output: big, OutputLimit: 20000}, false},
+		{"smaller per-result limit cannot lower the cap", tools.Result{Output: strings.Repeat("x", 3000), OutputLimit: 100}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := strings.Contains(e.x.render(tt.res), "omitted by ScoutClaw")
+			if got != tt.truncated {
+				t.Fatalf("truncated = %v, want %v", got, tt.truncated)
+			}
+		})
+	}
+}
+
+func TestEditsModeThroughExecutor(t *testing.T) {
+	e := newEnv(t, config.ApprovalEdits, ApprovalResponse{Approved: false})
+	ctx := context.Background()
+	if o := e.x.Run(ctx, call("fs_write", map[string]any{"path": "a.txt", "content": "x"})); !o.OK() || len(e.ap.asked) != 0 {
+		t.Fatalf("workspace write should run without a prompt: %+v asked=%d", o, len(e.ap.asked))
+	}
+	if o := e.x.Run(ctx, call("fs_delete", map[string]any{"path": "a.txt"})); o.OK() || len(e.ap.asked) != 1 {
+		t.Fatalf("delete must ask (and was declined): %+v asked=%d", o, len(e.ap.asked))
+	}
+	if _, err := os.Stat(filepath.Join(e.ws, "a.txt")); err != nil {
+		t.Fatal("declined delete removed the file")
+	}
+}
+
+func TestPreviewFailureStopsBeforeApproval(t *testing.T) {
+	e := newEnv(t, config.ApprovalAsk, ApprovalResponse{Approved: true})
+	os.WriteFile(filepath.Join(e.ws, "unread.txt"), []byte("a\n"), 0o644)
+	o := e.x.Run(context.Background(), call("fs_patch", map[string]any{"path": "unread.txt", "old_string": "a", "new_string": "b"}))
+	if o.OK() || len(e.ap.asked) != 0 || !strings.Contains(o.Text, "has not been read") {
+		t.Fatalf("a doomed edit must fail without asking: %+v asked=%d", o, len(e.ap.asked))
+	}
+}
+
+func TestSummarizeFileTools(t *testing.T) {
+	tests := []struct {
+		name string
+		in   any
+		want string
+	}{
+		{"fs_lines", map[string]any{"path": "a.go"}, "fs_lines a.go"},
+		{"fs_mkdir", map[string]any{"path": "d"}, "fs_mkdir d"},
+		{"fs_changes", map[string]any{}, "fs_changes"},
+		{"fs_copy", map[string]any{"src": "a", "dest": "b"}, "fs_copy a -> b"},
+		{"fs_move", map[string]any{"src": "a", "dest": "b"}, "fs_move a -> b"},
+		{"fs_delete", map[string]any{"path": "x"}, "fs_delete x"},
+		{"fs_delete", map[string]any{"path": "x", "recursive": true}, "fs_delete -r x"},
+		{"fs_undo", map[string]any{}, "fs_undo 1"},
+		{"fs_undo", map[string]any{"steps": 3, "path": "src"}, "fs_undo 3 src"},
+		{"fs_glob", map[string]any{"pattern": "*.go"}, "fs_glob *.go"},
+		{"fs_grep", map[string]any{"pattern": "TODO", "path": "src"}, `fs_grep "TODO" src`},
+		{"fs_read_many", map[string]any{"files": []map[string]any{{"path": "a"}, {"path": "b"}}}, "fs_read_many a b"},
+	}
+	for _, tt := range tests {
+		if got := Summarize(call(tt.name, tt.in)); got != tt.want {
+			t.Errorf("Summarize(%s %v) = %q, want %q", tt.name, tt.in, got, tt.want)
+		}
+	}
+}

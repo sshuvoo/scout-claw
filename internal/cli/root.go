@@ -81,9 +81,9 @@ fix (with your approval for anything risky) and verifies the result.
 	}
 	pf := root.PersistentFlags()
 	pf.StringVar(&a.fl.workspace, "workspace", "", "directory the agent may modify (default: current directory; env "+config.EnvWorkspace+")")
-	pf.StringVar(&a.fl.approval, "approval", "", "approval policy: ask | auto | readonly (default ask; env "+config.EnvApproval+")")
+	pf.StringVar(&a.fl.approval, "approval", "", "approval policy: ask | edits | auto | readonly (default ask; env "+config.EnvApproval+")")
 	pf.StringVar(&a.fl.model, "model", "", "model name (default "+config.DefaultModel+"; env "+config.EnvModel+")")
-	pf.IntVar(&a.fl.maxSteps, "max-steps", 0, "maximum agent iterations per task (default 25; env "+config.EnvMaxSteps+")")
+	pf.IntVar(&a.fl.maxSteps, "max-steps", 0, fmt.Sprintf("maximum agent iterations per task (default %d; env %s)", config.DefaultMaxSteps, config.EnvMaxSteps))
 	pf.BoolVarP(&a.fl.verbose, "verbose", "v", false, "show more tool output")
 	pf.BoolVar(&a.fl.noColor, "no-color", false, "disable colored output")
 	pf.BoolVar(&a.fl.plain, "plain", false, "use the simple line-based chat instead of the full-screen UI")

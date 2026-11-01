@@ -85,11 +85,12 @@ Precedence: **flags > environment variables > `.env` files > defaults**. `.env` 
 | `OPENAI_BASE_URL` | provider default | Alternative endpoint (must support the Responses API). |
 | `SCOUTCLAW_MODEL` / `--model` | `gpt-5.5` | Model name. |
 | `SCOUTCLAW_WORKSPACE` / `--workspace` | current dir | The only place edits are allowed without extra approval. |
-| `SCOUTCLAW_APPROVAL` / `--approval` | `ask` | `ask`, `auto` or `readonly` (see below). |
-| `SCOUTCLAW_MAX_STEPS` / `--max-steps` | `25` | Model iterations per task (1–200). |
+| `SCOUTCLAW_APPROVAL` / `--approval` | `ask` | `ask`, `edits`, `auto` or `readonly` (see below). |
+| `SCOUTCLAW_MAX_STEPS` / `--max-steps` | `100` | Model iterations per task (1–500). Coding tasks need far more than diagnostics; when the limit is hit, ScoutClaw asks the model for an honest status report, and in chat you can say "continue". |
 | `SCOUTCLAW_TOOL_TIMEOUT` | `2m` | Per-command timeout. |
 | `SCOUTCLAW_TASK_TIMEOUT` | `30m` | Whole-task timeout. |
 | `SCOUTCLAW_MAX_OUTPUT` | `16384` | Bytes of tool output kept per call. |
+| `SCOUTCLAW_MAX_READ` | `65536` | Bytes of file content `fs_read` may return per call (4096–1048576). |
 | `SCOUTCLAW_STATE_DIR` | `~/.local/state/scoutclaw` | Sessions, audit log, file backups (mode 0600/0700). |
 
 Invalid values fail at startup with a clear message. `scout config` shows the effective values (key masked).
@@ -123,7 +124,9 @@ Chat/interactive tips: Ctrl-C cancels the running task (children are terminated)
 
 Tools exposed to the model (all go through the same pipeline):
 
-- **Filesystem:** `fs_list`, `fs_read` (line ranges, tail mode), `fs_stat`, `fs_search` (regex + name glob), `fs_write`, `fs_patch` (exact-match edit). Edits show a diff before approval, keep a backup, and write atomically.
+- **Filesystem (read):** `fs_list`, `fs_read` (line ranges, tail mode), `fs_stat`, `fs_search` (regex + name glob).
+- **Filesystem (edit):** `fs_write` (create or overwrite), `fs_patch` (exact-text replacement; `edits[]` applies several to one file atomically), `fs_lines` (insert, replace or delete by line number, each guarded by the expected current text), `fs_mkdir`, `fs_copy`, `fs_move`, `fs_delete`. Every edit shows a diff (or a description) before approval, keeps a backup and writes atomically. A file must have been read with `fs_read` before it can be edited, and an edit is refused if the file changed since that read. BOM, CRLF/LF line endings, the trailing newline and file mode are kept. `fs_delete` and anything replaced by an overwrite go to a per-session trash in `SCOUTCLAW_STATE_DIR/trash`, never `unlink`.
+- **Change journal:** `fs_changes` lists this session's file changes with a combined diff per file; `fs_undo` reverts the latest ones (and refuses if a file was changed again afterwards). In chat: `/diff` and `/undo [n]`.
 - **Shell:** `shell_exec` (one executable + argument array, **no shell**), `shell_script` (bash: the system bash on Linux/macOS, Git Bash on Windows; always high risk), `shell_powershell` (Windows only: PowerShell 7, falling back to Windows PowerShell 5.1; always high risk). Override discovery with `SCOUT_BASH_PATH` / `SCOUT_POWERSHELL_PATH`; `scout doctor` shows what was found.
 - **System (Linux):** `sys_info` (OS, kernel, load, memory, swap, disk and inode usage), `process_list` (CPU/memory top, secrets in command lines masked), `env_list` (secret values masked), `dev_runtimes`. Service state and logs use `shell_exec` with `systemctl status` / `journalctl`.
 - **Network:** `net_dns`, `net_connect` (TCP), `net_http` (GET/HEAD, no credentials, bounded).
@@ -139,6 +142,8 @@ Tools exposed to the model (all go through the same pipeline):
 | Medium | `go test`, `npm install`, `docker restart`, edits inside the workspace, unknown commands | asks (`a` = allow this kind for the session) | runs | denied |
 | High | writes outside the workspace, `rm -r`, `systemctl restart`, `apt`, `git push`, `sudo`, firewall/permission changes, any `shell_script` / `shell_powershell` | asks (y/n only) | asks | denied |
 | Refused | `rm -rf /` or `~`, `mkfs`/`dd` to devices, killing PID 1, piping downloads into a shell, reading SSH/GPG/cloud credential files and `/etc/shadow`; on Windows/macOS also `diskpart`/`format`/`diskutil erase*`, deleting shadow copies, `iex` of downloaded content, encoded PowerShell, killing critical system processes | never runs | never | never |
+
+`edits` behaves like `ask`, except that medium-risk file edits inside the workspace (`fs_write`, `fs_patch`, `fs_lines`, `fs_mkdir`, `fs_copy`, `fs_move`, `fs_undo`) run without a prompt. Deletes, shell commands and anything outside the workspace still ask.
 
 Further guarantees:
 

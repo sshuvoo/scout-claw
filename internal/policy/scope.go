@@ -35,7 +35,10 @@ func NewScope(root string) Scope {
 // relative to base (or the workspace root when base is empty); "~" expands to
 // the home directory. Symlinks are resolved so a link cannot smuggle a path
 // out of the workspace.
-func (s Scope) Resolve(p, base string) string {
+func (s Scope) Resolve(p, base string) string { return realPath(s.absolute(p, base)) }
+
+// absolute is Resolve before symlinks are resolved.
+func (s Scope) absolute(p, base string) string {
 	if p == "~" || strings.HasPrefix(p, "~/") || (runtime.GOOS == "windows" && strings.HasPrefix(p, `~\`)) {
 		if home, err := os.UserHomeDir(); err == nil {
 			p = filepath.Join(home, strings.TrimPrefix(p, "~"))
@@ -50,7 +53,17 @@ func (s Scope) Resolve(p, base string) string {
 		}
 		p = filepath.Join(base, p)
 	}
-	return realPath(filepath.Clean(p))
+	return filepath.Clean(p)
+}
+
+// ResolveNoFollow is Resolve without following a symlink in the last path
+// element, so moving or deleting a link acts on the link, not its target.
+func (s Scope) ResolveNoFollow(p, base string) string {
+	a := s.absolute(p, base)
+	if filepath.Dir(a) == a {
+		return a
+	}
+	return filepath.Join(realPath(filepath.Dir(a)), filepath.Base(a))
 }
 
 // posixToWindows maps a rooted path without a drive letter, as Git Bash and

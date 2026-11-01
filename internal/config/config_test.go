@@ -10,7 +10,7 @@ import (
 )
 
 func clearEnv(t *testing.T) {
-	for _, k := range []string{EnvAPIKey, EnvBaseURL, EnvModel, EnvWorkspace, EnvStateDir, EnvApproval, EnvMaxSteps, EnvToolTimeout, EnvTaskTimeout, EnvMaxOutput, EnvLogLevel} {
+	for _, k := range []string{EnvAPIKey, EnvBaseURL, EnvModel, EnvWorkspace, EnvStateDir, EnvApproval, EnvMaxSteps, EnvToolTimeout, EnvTaskTimeout, EnvMaxOutput, EnvMaxRead, EnvLogLevel} {
 		t.Setenv(k, "")
 	}
 	t.Setenv(EnvStateDir, t.TempDir())
@@ -22,7 +22,7 @@ func TestDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Model != DefaultModel || c.MaxSteps != 25 || c.Approval != ApprovalAsk {
+	if c.Model != DefaultModel || c.MaxSteps != DefaultMaxSteps || c.Approval != ApprovalAsk {
 		t.Fatalf("unexpected defaults: %+v", c)
 	}
 	if c.RequireAPIKey() == nil {
@@ -42,7 +42,13 @@ func TestOverridesAndValidation(t *testing.T) {
 	if c.MaxSteps != 7 || c.ToolTimeout != 30*time.Second || c.Approval != ApprovalReadOnly {
 		t.Fatalf("overrides not applied: %+v", c)
 	}
-	for k, v := range map[string]string{EnvApproval: "yolo", EnvMaxSteps: "abc"} {
+	clearEnv(t)
+	t.Setenv(EnvApproval, "edits")
+	t.Setenv(EnvMaxRead, "131072")
+	if c, err := Load(); err != nil || c.Approval != ApprovalEdits || c.MaxRead != 128*1024 {
+		t.Fatalf("edits mode / max read: %v %+v", err, c)
+	}
+	for k, v := range map[string]string{EnvApproval: "yolo", EnvMaxSteps: "abc", EnvMaxRead: "100"} {
 		clearEnv(t)
 		t.Setenv(k, v)
 		if _, err := Load(); err == nil {
@@ -50,9 +56,15 @@ func TestOverridesAndValidation(t *testing.T) {
 		}
 	}
 	clearEnv(t)
-	t.Setenv(EnvMaxSteps, "0")
-	if _, err := Load(); err == nil {
-		t.Error("max steps 0 should fail")
+	for _, v := range []string{"0", "501"} {
+		t.Setenv(EnvMaxSteps, v)
+		if _, err := Load(); err == nil {
+			t.Errorf("max steps %s should fail", v)
+		}
+	}
+	t.Setenv(EnvMaxSteps, "500")
+	if c, err := Load(); err != nil || c.MaxSteps != 500 {
+		t.Errorf("max steps 500 should be accepted: %v", err)
 	}
 }
 

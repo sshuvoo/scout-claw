@@ -21,6 +21,9 @@ type Approval string
 const (
 	// ApprovalAsk prompts for medium and high risk actions (default).
 	ApprovalAsk Approval = "ask"
+	// ApprovalEdits runs medium risk file edits inside the workspace without
+	// prompting; everything else behaves like ApprovalAsk.
+	ApprovalEdits Approval = "edits"
 	// ApprovalAuto runs medium risk actions without prompting; high risk still prompts.
 	ApprovalAuto Approval = "auto"
 	// ApprovalReadOnly denies every action that is not low risk.
@@ -28,6 +31,13 @@ const (
 )
 
 const DefaultModel = "gpt-5.5" // the model the original implementation used
+
+// DefaultMaxSteps leaves room for coding tasks (explore, edit, build, test,
+// fix, re-test); simple diagnostics finish long before it.
+const (
+	DefaultMaxSteps = 100
+	MaxMaxSteps     = 500
+)
 
 type Config struct {
 	APIKey      string // never printed; see Masked
@@ -40,6 +50,7 @@ type Config struct {
 	ToolTimeout time.Duration
 	TaskTimeout time.Duration
 	MaxOutput   int // bytes of tool output kept per call
+	MaxRead     int // bytes of file content fs_read may return
 	LogLevel    string
 }
 
@@ -55,6 +66,7 @@ const (
 	EnvToolTimeout = "SCOUTCLAW_TOOL_TIMEOUT"
 	EnvTaskTimeout = "SCOUTCLAW_TASK_TIMEOUT"
 	EnvMaxOutput   = "SCOUTCLAW_MAX_OUTPUT"
+	EnvMaxRead     = "SCOUTCLAW_MAX_READ"
 	EnvLogLevel    = "SCOUTCLAW_LOG_LEVEL"
 )
 
@@ -65,10 +77,11 @@ func Load() (*Config, error) {
 		BaseURL:     os.Getenv(EnvBaseURL),
 		Model:       getenv(EnvModel, DefaultModel),
 		Approval:    Approval(getenv(EnvApproval, string(ApprovalAsk))),
-		MaxSteps:    25, // same limit as the original loop
+		MaxSteps:    DefaultMaxSteps,
 		ToolTimeout: 2 * time.Minute,
 		TaskTimeout: 30 * time.Minute,
 		MaxOutput:   16 * 1024,
+		MaxRead:     64 * 1024,
 		LogLevel:    getenv(EnvLogLevel, "warn"),
 	}
 	var err error
@@ -84,6 +97,9 @@ func Load() (*Config, error) {
 	if c.MaxOutput, err = envInt(EnvMaxOutput, c.MaxOutput); err != nil {
 		return nil, err
 	}
+	if c.MaxRead, err = envInt(EnvMaxRead, c.MaxRead); err != nil {
+		return nil, err
+	}
 	if c.ToolTimeout, err = envDuration(EnvToolTimeout, c.ToolTimeout); err != nil {
 		return nil, err
 	}
@@ -97,15 +113,18 @@ func Load() (*Config, error) {
 // commands such as `config` and `doctor` must work without one (see RequireAPIKey).
 func (c *Config) Validate() error {
 	switch c.Approval {
-	case ApprovalAsk, ApprovalAuto, ApprovalReadOnly:
+	case ApprovalAsk, ApprovalEdits, ApprovalAuto, ApprovalReadOnly:
 	default:
-		return fmt.Errorf("invalid approval policy %q (want ask, auto or readonly)", c.Approval)
+		return fmt.Errorf("invalid approval policy %q (want ask, edits, auto or readonly)", c.Approval)
 	}
-	if c.MaxSteps < 1 || c.MaxSteps > 200 {
-		return fmt.Errorf("max steps must be between 1 and 200, got %d", c.MaxSteps)
+	if c.MaxSteps < 1 || c.MaxSteps > MaxMaxSteps {
+		return fmt.Errorf("max steps must be between 1 and %d, got %d", MaxMaxSteps, c.MaxSteps)
 	}
 	if c.MaxOutput < 1024 || c.MaxOutput > 1<<20 {
 		return fmt.Errorf("max output must be between 1024 and 1048576 bytes, got %d", c.MaxOutput)
+	}
+	if c.MaxRead < 4096 || c.MaxRead > 1<<20 {
+		return fmt.Errorf("max read must be between 4096 and 1048576 bytes, got %d", c.MaxRead)
 	}
 	if c.ToolTimeout < time.Second || c.TaskTimeout < c.ToolTimeout {
 		return fmt.Errorf("timeouts invalid: tool=%s task=%s (tool >= 1s, task >= tool)", c.ToolTimeout, c.TaskTimeout)
@@ -126,6 +145,12 @@ func (c *Config) RequireAPIKey() error {
 func (c *Config) AuditPath() string   { return filepath.Join(c.StateDir, "audit.jsonl") }
 func (c *Config) SessionsDir() string { return filepath.Join(c.StateDir, "sessions") }
 func (c *Config) BackupsDir() string  { return filepath.Join(c.StateDir, "backups") }
+func (c *Config) TrashDir() string    { return filepath.Join(c.StateDir, "trash") }
+
+// JournalPath is the file-change journal of one session (used by fs_changes and fs_undo).
+func (c *Config) JournalPath(sessionID string) string {
+	return filepath.Join(c.StateDir, "journal", sessionID+".jsonl")
+}
 
 // MaskedKey describes the key without revealing it.
 func (c *Config) MaskedKey() string {

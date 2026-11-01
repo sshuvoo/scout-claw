@@ -6,6 +6,7 @@ package policy
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"scoutclaw/internal/config"
@@ -63,6 +64,8 @@ func (e *Engine) Decide(tool string, input json.RawMessage) Decision {
 		d.Reason = "approval policy is readonly; " + d.Reason
 	case d.Risk == Medium && e.Mode == config.ApprovalAuto:
 		d.Action = Allow
+	case d.Risk == Medium && e.Mode == config.ApprovalEdits && fileEditTools[tool] && !d.Outside:
+		d.Action = Allow
 	default:
 		d.Action = Ask
 	}
@@ -72,10 +75,19 @@ func (e *Engine) Decide(tool string, input json.RawMessage) Decision {
 // Classify assigns a risk level from the tool, its actual arguments and targets.
 func (e *Engine) Classify(tool string, input json.RawMessage) Decision {
 	switch tool {
-	case "fs_list", "fs_read", "fs_stat", "fs_search":
+	case "fs_list", "fs_read", "fs_stat", "fs_search", "fs_changes", "fs_glob", "fs_grep":
 		return e.classifyFSRead(input)
-	case "fs_write", "fs_patch":
+	case "fs_read_many":
+		return e.classifyReadMany(input)
+	case "fs_write", "fs_patch", "fs_lines", "fs_mkdir":
 		return e.classifyFSWrite(tool, input)
+	case "fs_copy", "fs_move":
+		return e.classifyTransfer(tool, input)
+	case "fs_delete":
+		return e.classifyDelete(input)
+	case "fs_undo":
+		return Decision{Risk: Medium, Reason: "reverts file changes ScoutClaw made in this session", Effects: "restores earlier file contents",
+			Recovery: "the current contents are backed up before they are replaced", Key: "fs_undo:workspace"}
 	case "shell_exec":
 		return e.classifyExec(input)
 	case "shell_script", "shell_powershell":
@@ -101,6 +113,25 @@ func (e *Engine) classifyFSRead(input json.RawMessage) Decision {
 	return Decision{Risk: Low, Reason: "read-only inspection"}
 }
 
+func (e *Engine) classifyReadMany(input json.RawMessage) Decision {
+	var in struct {
+		Files []struct {
+			Path string `json:"path"`
+		} `json:"files"`
+	}
+	_ = json.Unmarshal(input, &in)
+	for _, f := range in.Files {
+		if abs := e.Scope.Resolve(f.Path, ""); f.Path != "" && IsSensitive(abs) {
+			return Decision{Risk: High, Forbidden: true, Reason: fmt.Sprintf("%s is a credential or key file; ScoutClaw never reads these", abs)}
+		}
+	}
+	return Decision{Risk: Low, Reason: "read-only inspection"}
+}
+
+// fileEditTools are auto-approved inside the workspace in the "edits" approval mode.
+var fileEditTools = map[string]bool{"fs_write": true, "fs_patch": true, "fs_lines": true, "fs_mkdir": true,
+	"fs_copy": true, "fs_move": true, "fs_undo": true}
+
 func (e *Engine) classifyFSWrite(tool string, input json.RawMessage) Decision {
 	var in struct {
 		Path string `json:"path"`
@@ -109,7 +140,11 @@ func (e *Engine) classifyFSWrite(tool string, input json.RawMessage) Decision {
 	if in.Path == "" {
 		return Decision{Risk: Medium, Reason: "file modification", Key: tool + ":workspace"}
 	}
-	abs := e.Scope.Resolve(in.Path, "")
+	return e.classifyWritePath(tool, e.Scope.Resolve(in.Path, ""))
+}
+
+// classifyWritePath rates a change to one resolved path.
+func (e *Engine) classifyWritePath(tool, abs string) Decision {
 	switch {
 	case IsSensitive(abs):
 		return Decision{Risk: High, Forbidden: true, Reason: fmt.Sprintf("%s is a credential or key file; ScoutClaw never modifies these", abs)}
@@ -120,6 +155,71 @@ func (e *Engine) classifyFSWrite(tool string, input json.RawMessage) Decision {
 	}
 	return Decision{Risk: Medium, Reason: "modifies a file inside the workspace", Effects: "edits " + abs,
 		Recovery: "a backup of the previous contents is kept", Key: tool + ":workspace"}
+}
+
+func higher(a, b Decision) Decision {
+	if b.Forbidden || (!a.Forbidden && b.Risk > a.Risk) {
+		return b
+	}
+	return a
+}
+
+func (e *Engine) classifyTransfer(tool string, input json.RawMessage) Decision {
+	var in struct {
+		Src  string `json:"src"`
+		Dest string `json:"dest"`
+	}
+	_ = json.Unmarshal(input, &in)
+	if in.Src == "" || in.Dest == "" {
+		return Decision{Risk: Medium, Reason: "file operation", Key: tool + ":workspace"}
+	}
+	src, dest := e.Scope.ResolveNoFollow(in.Src, ""), e.Scope.ResolveNoFollow(in.Dest, "")
+	if IsSensitive(src) {
+		return Decision{Risk: High, Forbidden: true, Reason: fmt.Sprintf("%s is a credential or key file; ScoutClaw never copies or moves these", src)}
+	}
+	d := e.classifyWritePath(tool, dest)
+	if tool == "fs_move" {
+		if within(src, e.Scope.Root) || isProtectedDir(src) {
+			return Decision{Risk: High, Forbidden: true, Reason: fmt.Sprintf("moving %s would move the workspace, the home directory or a system directory", src)}
+		}
+		d = higher(d, e.classifyWritePath(tool, src))
+	}
+	verb := map[string]string{"fs_copy": "copies", "fs_move": "moves"}[tool]
+	d.Effects = fmt.Sprintf("%s %s to %s", verb, src, dest)
+	return d
+}
+
+func (e *Engine) classifyDelete(input json.RawMessage) Decision {
+	var in struct {
+		Path      string `json:"path"`
+		Recursive bool   `json:"recursive"`
+	}
+	_ = json.Unmarshal(input, &in)
+	if in.Path == "" {
+		return Decision{Risk: Medium, Reason: "file deletion"}
+	}
+	abs := e.Scope.ResolveNoFollow(in.Path, "")
+	recovery := "moved to the session trash; fs_undo restores it"
+	switch {
+	case IsSensitive(abs):
+		return Decision{Risk: High, Forbidden: true, Reason: fmt.Sprintf("%s is a credential or key file; ScoutClaw never deletes these", abs)}
+	case abs == e.Scope.Root || within(abs, e.Scope.Root) || isProtectedDir(abs):
+		return Decision{Risk: High, Forbidden: true, Reason: fmt.Sprintf("deleting %s would remove the workspace, the home directory or a system directory", abs)}
+	case filepath.Base(abs) == ".git":
+		return Decision{Risk: High, Forbidden: true, Reason: "deleting a .git directory destroys the repository history"}
+	case !e.Scope.Contains(abs):
+		return Decision{Risk: High, Outside: true, Reason: fmt.Sprintf("deletes %s, outside the workspace %s", abs, e.Scope.Root),
+			Effects: "removes a file or directory outside the project", Recovery: recovery}
+	case in.Recursive:
+		return Decision{Risk: High, Reason: "recursively deletes a directory inside the workspace", Effects: "removes " + abs + " and everything in it", Recovery: recovery}
+	}
+	return Decision{Risk: Medium, Reason: "deletes a file inside the workspace", Effects: "removes " + abs, Recovery: recovery, Key: "fs_delete:workspace"}
+}
+
+// within reports whether child is inside parent (or equal to it).
+func within(parent, child string) bool {
+	rel, err := filepath.Rel(parent, child)
+	return err == nil && (rel == "." || rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 type execInput struct {

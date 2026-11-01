@@ -8,13 +8,16 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
 
+	"scoutclaw/internal/audit"
 	"scoutclaw/internal/config"
 	"scoutclaw/internal/session"
+	"scoutclaw/internal/tools"
 )
 
 const banner = `
@@ -37,7 +40,9 @@ var tips = []string{
 var slashCommands = []struct{ name, desc string }{
 	{"/help", "show commands and keys"},
 	{"/model", "show or switch the model"},
-	{"/approval", "show or switch approvals (ask|auto|readonly)"},
+	{"/approval", "show or switch approvals (ask|edits|auto|readonly)"},
+	{"/diff", "file changes made in this session"},
+	{"/undo", "undo the last file change (/undo 3 for more)"},
 	{"/key", "enter or replace your API key"},
 	{"/config", "show effective configuration"},
 	{"/status", "session, limits and workspace"},
@@ -53,7 +58,9 @@ const helpText = `Type a task in plain language, or a slash command:
   /config               show effective configuration (key masked)
   /status               session, limits and workspace
   /model [name]         show or switch the model (this session only)
-  /approval [mode]      show or switch approvals: ask | auto | readonly (this session only)
+  /approval [mode]      show or switch approvals: ask | edits | auto | readonly (this session only)
+  /diff [path]          file changes ScoutClaw made in this session, with diffs
+  /undo [n]             undo the last n file changes (default 1)
   /key                  enter or replace your OpenAI API key (masked input)
   /history              recent sessions
   /doctor               quick local checks
@@ -182,17 +189,43 @@ func (a *App) slash(ctx context.Context, cfg *config.Config, ui *UI, rt *Runtime
 		return false, fresh
 	case "/approval":
 		if len(args) == 0 {
-			say("approval: %s   (ask | auto | readonly; switch with /approval <mode>)", cfg.Approval)
+			say("approval: %s   (ask | edits | auto | readonly; switch with /approval <mode>)", cfg.Approval)
 			break
 		}
 		mode := config.Approval(strings.ToLower(args[0]))
 		switch mode {
-		case config.ApprovalAsk, config.ApprovalAuto, config.ApprovalReadOnly:
+		case config.ApprovalAsk, config.ApprovalEdits, config.ApprovalAuto, config.ApprovalReadOnly:
 			cfg.Approval = mode
 			rt.Agent.Exec.Policy.Mode = mode
 			say("approval is now %s for this session", mode)
 		default:
-			say("%s", ui.c(cRed, "unknown mode; use ask, auto or readonly"))
+			say("%s", ui.c(cRed, "unknown mode; use ask, edits, auto or readonly"))
+		}
+	case "/diff":
+		path := ""
+		if len(args) > 0 {
+			path = rt.Files.Scope.Resolve(args[0], "")
+		}
+		say("%s", strings.TrimRight(ui.Redactor.Redact(rt.Files.Report(path)), "\n"))
+	case "/undo":
+		steps := 1
+		if len(args) > 0 {
+			n, err := strconv.Atoi(args[0])
+			if err != nil || n < 1 || n > 20 {
+				say("%s", ui.c(cRed, "usage: /undo [n]  (n = 1-20)"))
+				break
+			}
+			steps = n
+		}
+		// The user asked for this directly, so no approval prompt; it is still audited.
+		res, err := rt.Files.Undo(tools.WithGrant(ctx, tools.Grant{OutsideWorkspace: true}), steps, "")
+		rt.audit.Log(audit.Event{SessionID: rt.Session.ID, Kind: "user_undo", Tool: "fs_undo", Data: map[string]any{
+			"steps": steps, "output": res.Output, "error": fmt.Sprint(err)}})
+		if res.Output != "" {
+			say("%s", strings.TrimRight(res.Output, "\n"))
+		}
+		if err != nil {
+			say("%s", ui.c(cRed, err.Error()))
 		}
 	case "/key":
 		if err := a.promptForKey(ctx, cfg, ui, false); err != nil {

@@ -22,11 +22,16 @@ import (
 type FS struct {
 	Scope      policy.Scope
 	BackupDir  string // where pre-edit copies are stored
+	TrashDir   string // where deleted and replaced files and directories are moved
 	SessionID  string
-	MaxReadLen int // bytes returned by fs_read
+	MaxReadLen int    // bytes returned by fs_read
+	State      *State // read records and change journal; created by Tools if nil
 }
 
-const maxEditSize = 2 << 20
+const (
+	maxEditSize = 2 << 20
+	maxLineLen  = 2000 // longer lines are cut in fs_read output
+)
 
 type listArgs struct {
 	Path       string `json:"path"`
@@ -52,12 +57,20 @@ type writeArgs struct {
 	Path    string `json:"path"`
 	Content string `json:"content"`
 }
-type patchArgs struct {
-	Path       string `json:"path"`
+type editPair struct {
 	OldString  string `json:"old_string"`
 	NewString  string `json:"new_string"`
 	ReplaceAll bool   `json:"replace_all"`
 }
+type patchArgs struct {
+	Path       string     `json:"path"`
+	OldString  string     `json:"old_string"`
+	NewString  string     `json:"new_string"`
+	ReplaceAll bool       `json:"replace_all"`
+	Edits      []editPair `json:"edits"`
+}
+
+const maxEditsPerCall = 50
 
 func needPath(p string) error {
 	if strings.TrimSpace(p) == "" {
@@ -70,7 +83,10 @@ func needPath(p string) error {
 }
 
 func (f FS) Tools() []tools.Tool {
-	return []tools.Tool{
+	if f.State == nil {
+		f.State = NewState("")
+	}
+	return append([]tools.Tool{
 		&tools.Typed[listArgs]{
 			ToolName: "fs_list",
 			Desc:     "List directory contents (name, type, size, modified time). depth 1-3 recurses. Skips .git and node_modules when recursing.",
@@ -88,7 +104,7 @@ func (f FS) Tools() []tools.Tool {
 		},
 		&tools.Typed[readArgs]{
 			ToolName: "fs_read",
-			Desc:     "Read a text file with line numbers. Use offset_line/limit_lines for large files and logs (default 300 lines). Credential files are refused.",
+			Desc:     "Read a text file with line numbers. Use offset_line/limit_lines for large files and logs (default 300 lines). A file must be read before it can be edited. Credential files are refused.",
 			Schema:   `{"type":"object","properties":{"path":{"type":"string"},"offset_line":{"type":"integer","description":"1-based first line (default 1). Negative values read from the end, e.g. -100 = last 100 lines."},"limit_lines":{"type":"integer"}},"required":["path"],"additionalProperties":false}`,
 			ValidateFn: func(a *readArgs) error {
 				if a.Limit < 0 {
@@ -107,7 +123,7 @@ func (f FS) Tools() []tools.Tool {
 		},
 		&tools.Typed[searchArgs]{
 			ToolName: "fs_search",
-			Desc:     "Search for files by name glob and/or text by regular expression (Go RE2 syntax). Skips .git, node_modules and binary files.",
+			Desc:     "Older combined search; prefer fs_grep (contents, with context and .gitignore support) and fs_glob (file names). Searches by name glob and/or regex (Go RE2). Skips .git, node_modules and binary files.",
 			Schema:   `{"type":"object","properties":{"path":{"type":"string","description":"Root directory (default: workspace)."},"pattern":{"type":"string","description":"Regex to search inside files."},"name_glob":{"type":"string","description":"Glob on file names, e.g. *.log"},"max_results":{"type":"integer"},"ignore_case":{"type":"boolean"}},"additionalProperties":false}`,
 			ValidateFn: func(a *searchArgs) error {
 				if a.Path == "" {
@@ -132,7 +148,7 @@ func (f FS) Tools() []tools.Tool {
 		},
 		&tools.Typed[writeArgs]{
 			ToolName:   "fs_write",
-			Desc:       "Create or fully overwrite a text file. Shows a diff for approval and keeps a backup of any previous contents. Prefer fs_patch for edits to existing files.",
+			Desc:       "Create a text file or fully overwrite one. Overwriting requires that you read the file first; its BOM and line endings are kept. Shows a diff for approval and keeps a backup. Prefer fs_patch or fs_lines for edits to existing files.",
 			Schema:     `{"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"],"additionalProperties":false}`,
 			ValidateFn: func(a *writeArgs) error { return validateWrite(a.Path, a.Content) },
 			Run:        f.write,
@@ -140,21 +156,34 @@ func (f FS) Tools() []tools.Tool {
 		},
 		&tools.Typed[patchArgs]{
 			ToolName: "fs_patch",
-			Desc:     "Replace exact text in an existing file. old_string must match exactly once (or set replace_all). Shows a diff for approval and keeps a backup.",
-			Schema:   `{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["path","old_string","new_string"],"additionalProperties":false}`,
+			Desc:     "Replace exact text in a file you have read. Give old_string/new_string for one edit, or edits[] for several edits to the same file, applied in order and atomically (all or nothing). Each old_string must match exactly once unless replace_all is set. Shows a diff for approval and keeps a backup.",
+			Schema:   `{"type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string","description":"Exact text to replace (copy it from fs_read output without the line-number prefix)."},"new_string":{"type":"string"},"replace_all":{"type":"boolean"},"edits":{"type":"array","maxItems":50,"description":"Several edits instead of old_string/new_string.","items":{"type":"object","properties":{"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean"}},"required":["old_string","new_string"],"additionalProperties":false}}},"required":["path"],"additionalProperties":false}`,
 			ValidateFn: func(a *patchArgs) error {
-				if a.OldString == "" {
-					return errors.New("old_string must not be empty")
+				if len(a.Edits) > 0 {
+					if a.OldString != "" || a.NewString != "" || a.ReplaceAll {
+						return errors.New("give either old_string/new_string or edits, not both")
+					}
+				} else {
+					a.Edits = []editPair{{OldString: a.OldString, NewString: a.NewString, ReplaceAll: a.ReplaceAll}}
 				}
-				if a.OldString == a.NewString {
-					return errors.New("old_string and new_string are identical")
+				if len(a.Edits) > maxEditsPerCall {
+					return fmt.Errorf("at most %d edits per call", maxEditsPerCall)
+				}
+				for i, e := range a.Edits {
+					if e.OldString == "" {
+						return fmt.Errorf("edit %d: old_string must not be empty", i+1)
+					}
+					if e.OldString == e.NewString {
+						return fmt.Errorf("edit %d: old_string and new_string are identical", i+1)
+					}
 				}
 				return needPath(a.Path)
 			},
 			Run:       f.patch,
 			PreviewFn: f.previewPatch,
 		},
-	}
+		f.linesTool(),
+	}, append(f.manageTools(), f.searchTools()...)...)
 }
 
 func validateWrite(path, content string) error {
@@ -168,6 +197,19 @@ func validateWrite(path, content string) error {
 }
 
 func (f FS) resolve(p string) string { return f.Scope.Resolve(p, "") }
+
+// rel shows a resolved path relative to the workspace when it is inside it,
+// which keeps tool output short; other paths stay absolute.
+func (f FS) rel(abs string) string {
+	if f.Scope.Root == "" || !f.Scope.Contains(abs) {
+		return abs
+	}
+	r, err := filepath.Rel(f.Scope.Root, abs)
+	if err != nil {
+		return abs
+	}
+	return r
+}
 
 func (f FS) list(ctx context.Context, a listArgs) (tools.Result, error) {
 	root := f.resolve(a.Path)
@@ -219,7 +261,7 @@ func (f FS) list(ctx context.Context, a listArgs) (tools.Result, error) {
 		}
 	}
 	walk(root, 1)
-	out := fmt.Sprintf("%s (%d entries shown)\n%s", root, count, b.String())
+	out := fmt.Sprintf("%s (%d entries shown)\n%s", f.rel(root), count, b.String())
 	if truncated {
 		out += fmt.Sprintf("[more entries omitted; limit %d]\n", limit)
 	}
@@ -248,6 +290,16 @@ func (f FS) read(ctx context.Context, a readArgs) (tools.Result, error) {
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return tools.Result{}, err
 	}
+	// Editable files are read whole so the edit tools can tell whether the
+	// file changed after this read.
+	var src io.Reader = file
+	var data []byte
+	if st.Size() <= maxEditSize {
+		if data, err = io.ReadAll(file); err != nil {
+			return tools.Result{}, mapErr(err)
+		}
+		src = bytes.NewReader(data)
+	}
 	limit := a.Limit
 	if limit == 0 {
 		limit = 300
@@ -258,7 +310,7 @@ func (f FS) read(ctx context.Context, a readArgs) (tools.Result, error) {
 		maxBytes = 32 * 1024
 	}
 
-	sc := bufio.NewScanner(file)
+	sc := bufio.NewScanner(src)
 	sc.Buffer(make([]byte, 64*1024), 1<<20)
 	var lines []string
 	total := 0
@@ -294,6 +346,12 @@ func (f FS) read(ctx context.Context, a readArgs) (tools.Result, error) {
 	var b strings.Builder
 	used, truncated := 0, false
 	for i, l := range lines {
+		if start+i == 1 {
+			l = strings.TrimPrefix(l, utf8BOM)
+		}
+		if len(l) > maxLineLen {
+			l = fmt.Sprintf("%s… [line cut: %d chars]", l[:maxLineLen], len(l))
+		}
 		row := fmt.Sprintf("%6d\t%s\n", start+i, l)
 		if used+len(row) > maxBytes {
 			truncated = true
@@ -303,14 +361,22 @@ func (f FS) read(ctx context.Context, a readArgs) (tools.Result, error) {
 		b.WriteString(row)
 	}
 	shown := strings.Count(b.String(), "\n")
-	header := fmt.Sprintf("%s: lines %d-%d of %d\n", p, start, start+shown-1, total)
+	info := ""
+	if data != nil {
+		f.State.sawContent(p, string(data))
+		info = " | sha " + short(hashOf(string(data)))
+		if bytes.Contains(data, []byte("\r\n")) {
+			info += " | CRLF line endings"
+		}
+	}
+	header := fmt.Sprintf("%s: lines %d-%d of %d%s\n", f.rel(p), start, start+shown-1, total, info)
 	if shown == 0 {
-		header = fmt.Sprintf("%s: empty or offset beyond end (%d lines)\n", p, total)
+		header = fmt.Sprintf("%s: empty or offset beyond end (%d lines)%s\n", f.rel(p), total, info)
 	}
 	if start+shown-1 < total {
 		truncated = true
 	}
-	return tools.Result{Output: header + b.String(), Truncated: truncated}, nil
+	return tools.Result{Output: header + b.String(), Truncated: truncated, OutputLimit: maxBytes + len(header)}, nil
 }
 
 func (f FS) stat(ctx context.Context, a statArgs) (tools.Result, error) {
@@ -388,7 +454,7 @@ func (f FS) search(ctx context.Context, a searchArgs) (tools.Result, error) {
 		}
 		if re == nil {
 			found++
-			fmt.Fprintln(&b, path)
+			fmt.Fprintln(&b, f.rel(path))
 		} else {
 			info, err := d.Info()
 			if err != nil || info.Size() > 2<<20 {
@@ -400,7 +466,7 @@ func (f FS) search(ctx context.Context, a searchArgs) (tools.Result, error) {
 				return nil
 			}
 			for _, m := range matches {
-				fmt.Fprintf(&b, "%s:%d: %s\n", path, m.line, m.text)
+				fmt.Fprintf(&b, "%s:%d: %s\n", f.rel(path), m.line, m.text)
 				found++
 			}
 		}

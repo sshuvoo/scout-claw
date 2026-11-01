@@ -330,6 +330,7 @@ func (a *App) printConfig(cfg *config.Config, out io.Writer) {
 	row("tool timeout", cfg.ToolTimeout.String(), config.EnvToolTimeout)
 	row("task timeout", cfg.TaskTimeout.String(), config.EnvTaskTimeout)
 	row("max output", fmt.Sprintf("%d bytes", cfg.MaxOutput), config.EnvMaxOutput)
+	row("max read", fmt.Sprintf("%d bytes", cfg.MaxRead), config.EnvMaxRead)
 }
 
 const repo = "sshuvoo/scout-claw"

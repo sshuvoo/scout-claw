@@ -19,6 +19,7 @@ import (
 	"scoutclaw/internal/redact"
 	"scoutclaw/internal/session"
 	"scoutclaw/internal/tools/builtin"
+	"scoutclaw/internal/tools/filesystem"
 	"scoutclaw/internal/verify"
 )
 
@@ -43,6 +44,7 @@ type Runtime struct {
 	UI      *UI
 	Agent   *agent.Agent
 	Session *session.Session
+	Files   filesystem.FS // for /diff and /undo; shares state with the agent's tools
 	audit   *audit.Logger
 }
 
@@ -76,11 +78,13 @@ func newRuntime(cfg *config.Config, ui *UI, sess *session.Session) (*Runtime, er
 	plat := platform.Detect()
 	scope := policy.NewScope(cfg.Workspace)
 	tracker := &verify.Tracker{}
-	reg, state := builtin.New(builtin.Options{
-		Scope: scope, BackupDir: cfg.BackupsDir(), SessionID: sess.ID, MaxOutput: cfg.MaxOutput,
+	opts := builtin.Options{
+		Scope: scope, BackupDir: cfg.BackupsDir(), TrashDir: cfg.TrashDir(), Files: filesystem.NewState(cfg.JournalPath(sess.ID)),
+		SessionID: sess.ID, MaxOutput: cfg.MaxOutput, MaxRead: cfg.MaxRead,
 		ToolTimeout: cfg.ToolTimeout, StripEnv: []string{config.EnvAPIKey}, Tracker: tracker,
 		Shells: plat.Shells,
-	})
+	}
+	reg, state := builtin.New(opts)
 	exec := &executor.Executor{
 		Registry: reg, Policy: policy.New(scope, cfg.Approval), Approver: ui, Audit: lg, Redactor: red,
 		Tracker: tracker, SessionID: sess.ID, ToolTimeout: cfg.ToolTimeout, MaxOutput: cfg.MaxOutput,
@@ -99,7 +103,7 @@ func newRuntime(cfg *config.Config, ui *UI, sess *session.Session) (*Runtime, er
 			ui.Notice(fmt.Sprintf("session was created with model %s; continuing with %s", sess.Model, cfg.Model))
 		}
 	}
-	return &Runtime{Cfg: cfg, UI: ui, Agent: ag, Session: sess, audit: lg}, nil
+	return &Runtime{Cfg: cfg, UI: ui, Agent: ag, Session: sess, Files: builtin.FS(opts), audit: lg}, nil
 }
 
 // syncSession copies the agent's conversation pointer into the session so a
