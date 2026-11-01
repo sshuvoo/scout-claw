@@ -73,17 +73,18 @@ func newRuntime(cfg *config.Config, ui *UI, sess *session.Session) (*Runtime, er
 	if sess == nil {
 		sess = session.New(cfg.SessionsDir(), cfg.Workspace, cfg.Model)
 	}
+	plat := platform.Detect()
 	scope := policy.NewScope(cfg.Workspace)
 	tracker := &verify.Tracker{}
 	reg, state := builtin.New(builtin.Options{
 		Scope: scope, BackupDir: cfg.BackupsDir(), SessionID: sess.ID, MaxOutput: cfg.MaxOutput,
 		ToolTimeout: cfg.ToolTimeout, StripEnv: []string{config.EnvAPIKey}, Tracker: tracker,
+		Shells: plat.Shells,
 	})
 	exec := &executor.Executor{
 		Registry: reg, Policy: policy.New(scope, cfg.Approval), Approver: ui, Audit: lg, Redactor: red,
 		Tracker: tracker, SessionID: sess.ID, ToolTimeout: cfg.ToolTimeout, MaxOutput: cfg.MaxOutput,
 	}
-	plat := platform.Detect()
 	ag := &agent.Agent{
 		LLM: provider, Exec: exec, Registry: reg, State: state, Audit: lg, Reporter: ui, SessionID: sess.ID,
 		Limits:   agent.Limits{MaxSteps: cfg.MaxSteps, TaskTimeout: cfg.TaskTimeout},

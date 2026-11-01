@@ -225,7 +225,12 @@ With --online it also sends one tiny request to the model to prove the key and m
 			}
 			check(err == nil, true, "state directory", orStr(errString(err), cfg.StateDir+" (writable)"))
 
-			for _, bin := range []string{"git", "docker", "systemctl"} {
+			check(p.Shells.Bash != "", false, "shell_script (bash)", orStr(p.Shells.Bash, "not found; set "+platform.EnvBash+map[bool]string{true: " or install Git for Windows", false: ""}[p.OS == "windows"]))
+			if p.OS == "windows" {
+				check(p.Shells.PowerShell != "", false, "shell_powershell", orStr(p.Shells.PowerShell, "not found; set "+platform.EnvPowerShell))
+			}
+			services := map[string]string{"darwin": "launchctl", "windows": "sc"}[p.OS]
+			for _, bin := range []string{"git", "docker", orStr(services, "systemctl")} {
 				path, err := lookPath(bin)
 				check(err == nil, false, "optional: "+bin, orStr(path, "not found (related diagnostics unavailable)"))
 			}

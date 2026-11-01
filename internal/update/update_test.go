@@ -2,6 +2,7 @@ package update
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -12,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -29,10 +31,28 @@ func archive(t *testing.T, files map[string][]byte) []byte {
 	return buf.Bytes()
 }
 
+func zipArchive(t *testing.T, files map[string][]byte) []byte {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for n, b := range files {
+		w, _ := zw.Create(n)
+		w.Write(b)
+	}
+	zw.Close()
+	return buf.Bytes()
+}
+
 func release(t *testing.T, tag string, bin []byte, corrupt bool) (*Updater, func()) {
+	return releaseFor(t, "linux", tag, bin, corrupt)
+}
+
+func releaseFor(t *testing.T, goos, tag string, bin []byte, corrupt bool) (*Updater, func()) {
 	u := New("o/r")
-	u.GOOS, u.GOARCH = "linux", "amd64"
+	u.GOOS, u.GOARCH = goos, "amd64"
 	arc := archive(t, map[string][]byte{"scout": bin, "README.md": []byte("hi")})
+	if goos == "windows" {
+		arc = zipArchive(t, map[string][]byte{"scout.exe": bin, "README.md": []byte("hi")})
+	}
 	sum := sha256.Sum256(arc)
 	if corrupt {
 		sum[0] ^= 0xff
@@ -81,9 +101,25 @@ func TestMissingReleaseAndUnsupportedOS(t *testing.T) {
 	if _, err := u.Fetch(context.Background(), "v9.9.9"); err == nil {
 		t.Fatal("missing asset must fail")
 	}
-	u.GOOS = "windows"
+	u.GOOS = "plan9"
 	if _, err := u.Fetch(context.Background(), "v1.0.0"); err == nil || !strings.Contains(err.Error(), "no prebuilt release") {
 		t.Fatalf("%v", err)
+	}
+}
+
+func TestWindowsReleaseIsZip(t *testing.T) {
+	bin := bytes.Repeat([]byte("W"), 4096)
+	u, stop := releaseFor(t, "windows", "v1.2.3", bin, false)
+	defer stop()
+	if name := u.ArchiveName("v1.2.3"); name != "scoutclaw_1.2.3_windows_amd64.zip" {
+		t.Fatalf("archive name %q", name)
+	}
+	got, err := u.Fetch(context.Background(), "v1.2.3")
+	if err != nil || !bytes.Equal(got, bin) {
+		t.Fatalf("%v", err)
+	}
+	if _, err := extractZip(zipArchive(t, map[string][]byte{"scout": bin})); err == nil {
+		t.Fatal("a zip without scout.exe must be rejected")
 	}
 }
 
@@ -102,7 +138,7 @@ func TestReplaceIsAtomicAndKeepsExecutable(t *testing.T) {
 	}
 	b, _ := os.ReadFile(p)
 	st, _ := os.Stat(p)
-	if string(b) != "new binary" || st.Mode().Perm() != 0o755 {
+	if string(b) != "new binary" || (runtime.GOOS != "windows" && st.Mode().Perm() != 0o755) {
 		t.Fatalf("%q %v", b, st.Mode())
 	}
 	if m, _ := filepath.Glob(filepath.Join(dir, ".scout-update-*")); len(m) != 0 {

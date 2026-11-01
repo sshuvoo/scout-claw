@@ -5,6 +5,7 @@ package update
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -95,14 +96,19 @@ func (u *Updater) get(ctx context.Context, url string, limit int64) ([]byte, err
 	return b, nil
 }
 
-// ArchiveName matches install.sh and the release assets.
+// ArchiveName matches install.sh / install.ps1 and the release assets
+// (.zip on Windows, .tar.gz elsewhere; see .goreleaser.yaml).
 func (u *Updater) ArchiveName(tag string) string {
-	return fmt.Sprintf("scoutclaw_%s_%s_%s.tar.gz", strings.TrimPrefix(tag, "v"), u.GOOS, u.GOARCH)
+	ext := "tar.gz"
+	if u.GOOS == "windows" {
+		ext = "zip"
+	}
+	return fmt.Sprintf("scoutclaw_%s_%s_%s.%s", strings.TrimPrefix(tag, "v"), u.GOOS, u.GOARCH, ext)
 }
 
 // Fetch downloads and verifies the release for this platform and returns the new binary.
 func (u *Updater) Fetch(ctx context.Context, tag string) ([]byte, error) {
-	if u.GOOS != "linux" && u.GOOS != "darwin" {
+	if u.GOOS != "linux" && u.GOOS != "darwin" && u.GOOS != "windows" {
 		return nil, fmt.Errorf("no prebuilt release for %s; build from source", u.GOOS)
 	}
 	name := u.ArchiveName(tag)
@@ -122,6 +128,9 @@ func (u *Updater) Fetch(ctx context.Context, tag string) ([]byte, error) {
 	got := sha256.Sum256(archive)
 	if !strings.EqualFold(hex.EncodeToString(got[:]), want) {
 		return nil, errors.New("checksum mismatch: refusing to install")
+	}
+	if u.GOOS == "windows" {
+		return extractZip(archive)
 	}
 	return extract(archive)
 }
@@ -161,8 +170,35 @@ func extract(archive []byte) ([]byte, error) {
 	}
 }
 
+// extractZip returns the "scout.exe" file from a Windows release archive.
+func extractZip(archive []byte) ([]byte, error) {
+	zr, err := zip.NewReader(bytes.NewReader(archive), int64(len(archive)))
+	if err != nil {
+		return nil, fmt.Errorf("bad archive: %w", err)
+	}
+	for _, f := range zr.File {
+		if f.Name != "scout.exe" || !f.Mode().IsRegular() {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return nil, fmt.Errorf("bad archive: %w", err)
+		}
+		defer rc.Close()
+		b, err := io.ReadAll(io.LimitReader(rc, maxBinary+1))
+		if err != nil || int64(len(b)) > maxBinary || len(b) < 1024 {
+			return nil, errors.New("archive contains an invalid scout binary")
+		}
+		return b, nil
+	}
+	return nil, errors.New("archive does not contain the scout binary")
+}
+
 // Replace atomically swaps the executable at path with data. Renaming over a
 // running binary is safe on Linux and macOS: the old process keeps its inode.
+// Windows refuses to overwrite a running executable but allows renaming it,
+// so there the old file is moved aside to path+".old" first (and removed on
+// the next update, once it is no longer running).
 func Replace(path string, data []byte) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".scout-update-*")
@@ -183,7 +219,19 @@ func Replace(path string, data []byte) error {
 	if err := os.Chmod(tmp.Name(), 0o755); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), path)
+	if runtime.GOOS != "windows" {
+		return os.Rename(tmp.Name(), path)
+	}
+	old := path + ".old"
+	_ = os.Remove(old) // left by the previous update
+	if err := os.Rename(path, old); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("moving the running executable aside: %w", err)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		_ = os.Rename(old, path)
+		return err
+	}
+	return nil
 }
 
 // Newer reports whether latest is a higher vX.Y.Z than current. Anything that

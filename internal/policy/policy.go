@@ -78,8 +78,8 @@ func (e *Engine) Classify(tool string, input json.RawMessage) Decision {
 		return e.classifyFSWrite(tool, input)
 	case "shell_exec":
 		return e.classifyExec(input)
-	case "shell_script":
-		return e.classifyScript(input)
+	case "shell_script", "shell_powershell":
+		return e.classifyScript(tool, input)
 	case "sys_info", "process_list", "env_list", "dev_runtimes",
 		"net_dns", "net_connect", "net_http", "update_plan", "finish":
 		return Decision{Risk: Low, Reason: "bounded read-only diagnostic"}
@@ -147,16 +147,24 @@ func (e *Engine) classifyExec(input json.RawMessage) Decision {
 	return d
 }
 
-func (e *Engine) classifyScript(input json.RawMessage) Decision {
+func (e *Engine) classifyScript(tool string, input json.RawMessage) Decision {
 	var in struct {
-		Script string `json:"script"`
+		Script  string `json:"script"`
+		Workdir string `json:"workdir"`
 	}
 	_ = json.Unmarshal(input, &in)
-	if why := forbiddenScript(in.Script); why != "" {
+	workdir := e.Scope.Root
+	if in.Workdir != "" {
+		workdir = e.Scope.Resolve(in.Workdir, "")
+	}
+	if tool == "shell_script" {
+		return e.classifyBash(in.Script, workdir)
+	}
+	if why := forbiddenPowerShell(in.Script); why != "" {
 		return Decision{Risk: High, Forbidden: true, Reason: why}
 	}
-	return Decision{Risk: High, Reason: "shell script: every construct in it (pipes, redirects, substitutions) is an execution surface",
-		Effects: "runs the full script through /bin/sh", Recovery: "depends on the script; review it carefully"}
+	return Decision{Risk: High, Reason: "PowerShell script: it can call any cmdlet, .NET API or program",
+		Effects: "runs the full script through PowerShell", Recovery: "depends on the script; review it carefully"}
 }
 
 func coalesce(a, b string) string {

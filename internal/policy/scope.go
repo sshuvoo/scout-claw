@@ -3,8 +3,20 @@ package policy
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
+
+// caseInsensitiveFS is true where the default filesystem ignores case, so
+// "RM" runs rm and "/ETC/shadow" is /etc/shadow.
+var caseInsensitiveFS = runtime.GOOS == "windows" || runtime.GOOS == "darwin"
+
+func foldCase(s string) string {
+	if caseInsensitiveFS {
+		return strings.ToLower(s)
+	}
+	return s
+}
 
 // Scope defines the workspace and resolves paths against it.
 type Scope struct {
@@ -24,7 +36,7 @@ func NewScope(root string) Scope {
 // the home directory. Symlinks are resolved so a link cannot smuggle a path
 // out of the workspace.
 func (s Scope) Resolve(p, base string) string {
-	if p == "~" || strings.HasPrefix(p, "~/") {
+	if p == "~" || strings.HasPrefix(p, "~/") || (runtime.GOOS == "windows" && strings.HasPrefix(p, `~\`)) {
 		if home, err := os.UserHomeDir(); err == nil {
 			p = filepath.Join(home, strings.TrimPrefix(p, "~"))
 		}
@@ -81,8 +93,10 @@ func IsSensitive(abs string) bool {
 			return true
 		}
 	}
-	slash := filepath.ToSlash(abs)
-	for _, frag := range []string{"/.gnupg/", "/.aws/credentials", "/.config/gcloud/", "/.kube/config", "/.docker/config.json", "/.npmrc", "/.ssh/id_", "/etc/shadow", "/etc/gshadow", "/etc/sudoers"} {
+	slash := foldCase(filepath.ToSlash(abs))
+	for _, frag := range []string{"/.gnupg/", "/.aws/credentials", "/.config/gcloud/", "/.kube/config", "/.docker/config.json", "/.npmrc", "/.ssh/id_", "/etc/shadow", "/etc/gshadow", "/etc/sudoers",
+		"/library/keychains/", // macOS
+		"/appdata/roaming/microsoft/credentials/", "/appdata/local/microsoft/credentials/", "/appdata/roaming/microsoft/protect/", "/windows/system32/config/sam", "/windows/system32/config/security"} {
 		if strings.Contains(slash+"/", frag) || strings.HasSuffix(slash, strings.TrimSuffix(frag, "/")) {
 			return true
 		}
@@ -90,12 +104,50 @@ func IsSensitive(abs string) bool {
 	return false
 }
 
-var systemPrefixes = []string{"/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/boot", "/var", "/opt", "/sys", "/proc", "/dev", "/root"}
+var systemPrefixes = func() []string {
+	switch runtime.GOOS {
+	case "windows":
+		var ps []string
+		for _, env := range []string{"SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "ProgramData"} {
+			if v := os.Getenv(env); v != "" {
+				ps = append(ps, filepath.Clean(v))
+			}
+		}
+		if d := os.Getenv("SystemDrive"); d != "" {
+			ps = append(ps, filepath.Join(d+`\`, "Users"))
+		}
+		return ps
+	case "darwin":
+		return []string{"/etc", "/usr", "/bin", "/sbin", "/var", "/opt", "/dev", "/System", "/Library", "/Applications", "/private", "/private/etc", "/private/var", "/cores"}
+	}
+	return []string{"/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/boot", "/var", "/opt", "/sys", "/proc", "/dev", "/root"}
+}()
 
 // IsSystemPath reports whether abs lives in a system directory.
 func IsSystemPath(abs string) bool {
+	abs = foldCase(abs)
+	sep := string(filepath.Separator)
 	for _, p := range systemPrefixes {
-		if abs == p || strings.HasPrefix(abs, p+"/") {
+		p = foldCase(p)
+		if abs == p || strings.HasPrefix(abs, p+sep) {
+			return true
+		}
+	}
+	return false
+}
+
+// isProtectedDir reports whether abs is a filesystem root, the home directory
+// or a top-level system directory: places whose recursive deletion is never
+// approvable.
+func isProtectedDir(abs string) bool {
+	if filepath.Dir(abs) == abs {
+		return true
+	}
+	if home, err := homeDir(); err == nil && foldCase(abs) == foldCase(home) {
+		return true
+	}
+	for _, p := range systemPrefixes {
+		if foldCase(abs) == foldCase(p) {
 			return true
 		}
 	}

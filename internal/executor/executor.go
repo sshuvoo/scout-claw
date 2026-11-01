@@ -189,7 +189,7 @@ func (x *Executor) recordEvidence(call Call, d policy.Decision, res *tools.Resul
 		return
 	}
 	purpose := res.Metadata["purpose"]
-	isShell := call.Name == "shell_exec" || call.Name == "shell_script"
+	isShell := call.Name == "shell_exec" || call.Name == "shell_script" || call.Name == "shell_powershell"
 	if isShell && purpose == "verify" {
 		x.Tracker.RecordCheck(Summarize(call), res.ExitCode, res.OK())
 		return
@@ -324,12 +324,12 @@ func Summarize(c Call) string {
 			}
 		}
 		return strings.Join(parts, " ")
-	case "shell_script":
+	case "shell_script", "shell_powershell":
 		s := strings.TrimSpace(str("script"))
 		if len(s) > 200 {
 			s = s[:200] + "…"
 		}
-		return "sh -c " + fmt.Sprintf("%q", s)
+		return map[string]string{"shell_script": "bash -c ", "shell_powershell": "pwsh -c "}[c.Name] + fmt.Sprintf("%q", s)
 	case "fs_write", "fs_patch", "fs_read", "fs_stat", "fs_list":
 		return c.Name + " " + str("path")
 	case "fs_search":

@@ -8,9 +8,11 @@ import (
 	"time"
 )
 
+type procTree struct{}
+
 // configureProcess puts the child in its own process group so that timeout and
 // cancellation can terminate it together with everything it spawned.
-func configureProcess(cmd *exec.Cmd) {
+func configureProcess(cmd *exec.Cmd) procTree {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
@@ -26,4 +28,9 @@ func configureProcess(cmd *exec.Cmd) {
 		return nil
 	}
 	cmd.WaitDelay = 3 * time.Second
+	return procTree{}
 }
+
+// attach is a no-op: the process group is set up at spawn time.
+func (procTree) attach(*exec.Cmd) {}
+func (procTree) release()         {}

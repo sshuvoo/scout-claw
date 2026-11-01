@@ -11,6 +11,8 @@ require (
 	github.com/charmbracelet/x/ansi v0.11.9
 	github.com/openai/openai-go/v3 v3.78.0
 	github.com/spf13/cobra v1.10.2
+	golang.org/x/sys v0.48.0
+	mvdan.cc/sh/v3 v3.14.1
 )
 
 require (
@@ -47,7 +49,6 @@ require (
 	github.com/yuin/goldmark v1.7.13 // indirect
 	github.com/yuin/goldmark-emoji v1.0.6 // indirect
 	golang.org/x/net v0.60.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/term v0.46.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 )

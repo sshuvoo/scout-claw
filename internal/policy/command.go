@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 )
 
@@ -15,17 +16,127 @@ var readOnlyCommands = setOf(
 	"realpath", "readlink", "basename", "dirname", "tree", "md5sum", "sha256sum", "sha1sum", "ping", "traceroute", "tracepath",
 	"dig", "nslookup", "host", "getent", "resolvectl", "nmcli", "ifconfig", "sensors", "smartctl", "findmnt", "ulimit",
 	"echo", "true", "false", "test", "sleep", "seq", "jq", "yq", "xxd", "strings", "ldd", "nm", "apt-cache", "dpkg-query", "lsb_release",
+	// macOS
+	"sw_vers", "system_profiler", "vm_stat", "mdfind", "mdls", "otool", "fs_usage", "shasum",
+	// Windows
+	"where", "tasklist", "ipconfig", "systeminfo", "ver", "findstr", "getmac", "driverquery",
 )
 
 var wrappers = setOf("env", "nice", "ionice", "nohup", "timeout", "time", "stdbuf", "command")
 var privilege = setOf("sudo", "su", "doas", "pkexec", "runuser", "setpriv")
-var shells = setOf("sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh")
+var shells = setOf("sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "pwsh", "powershell", "cmd")
 var inlineInterp = map[string]string{"python": "-c", "python3": "-c", "node": "-e", "nodejs": "-e", "perl": "-e", "ruby": "-e", "php": "-r"}
 var systemHigh = setOf("apt", "apt-get", "aptitude", "dpkg", "dnf", "yum", "rpm", "pacman", "zypper", "apk", "snap", "flatpak",
 	"reboot", "shutdown", "poweroff", "halt", "init", "telinit", "passwd", "useradd", "userdel", "usermod", "groupadd", "groupdel",
 	"chpasswd", "visudo", "mount", "umount", "fdisk", "parted", "sfdisk", "gdisk", "mkswap", "swapon", "swapoff", "modprobe",
-	"insmod", "rmmod", "iptables", "ip6tables", "nft", "ufw", "firewall-cmd", "setenforce", "aa-enforce", "aa-complain", "crontab", "at", "update-grub", "grub-install")
+	"insmod", "rmmod", "iptables", "ip6tables", "nft", "ufw", "firewall-cmd", "setenforce", "aa-enforce", "aa-complain", "crontab", "at", "update-grub", "grub-install",
+	// macOS
+	"launchctl", "diskutil", "csrutil", "spctl", "nvram", "systemsetup", "dscl", "pmset", "softwareupdate", "installer", "tmutil", "kextload", "kextunload",
+	// Windows
+	"reg", "sc", "netsh", "schtasks", "winget", "choco", "scoop", "msiexec", "bcdedit", "takeown", "cipher", "wsl", "dism", "sfc", "vssadmin", "wbadmin", "wevtutil", "setx")
 var fileMutators = setOf("rm", "rmdir", "mv", "cp", "mkdir", "touch", "ln", "chmod", "chown", "chgrp", "truncate", "tee", "install", "rsync", "unlink", "sed", "patch")
+
+// criticalWindowsProcs crash or log off the system when terminated.
+var criticalWindowsProcs = setOf("system", "csrss", "wininit", "winlogon", "lsass", "smss", "services", "svchost")
+
+// commandName normalises an executable for classification: its base name,
+// lower-cased where the filesystem ignores case, without Windows' .exe.
+func commandName(exe string) string {
+	name := foldCase(filepath.Base(exe))
+	if runtime.GOOS == "windows" {
+		name = strings.TrimSuffix(strings.TrimSuffix(name, ".exe"), ".com")
+	}
+	return name
+}
+
+// classifyShellInvocation handles a shell run directly through shell_exec. An
+// inline script is classified like the matching script tool.
+func (e *Engine) classifyShellInvocation(name string, args []string, workdir string) Decision {
+	switch name {
+	case "pwsh", "powershell":
+		script := strings.Join(args, " ")
+		if why := forbiddenPowerShell(" " + script); why != "" {
+			return forbid(strings.TrimPrefix(why, "refused: "))
+		}
+		if containsFold(args, "-file", "-f") {
+			return dec(Medium, "runs a PowerShell script file")
+		}
+		if len(args) == 1 && oneOfFold(args[0], "-version", "-v", "--version", "-help", "-?") {
+			return dec(Low, "version/help query")
+		}
+		return dec(High, "inline PowerShell passed to "+name)
+	case "cmd":
+		for i, a := range args {
+			if strings.EqualFold(a, "/c") || strings.EqualFold(a, "/k") {
+				if why := forbiddenPowerShell(" " + strings.Join(args[i+1:], " ")); why != "" {
+					return forbid(strings.TrimPrefix(why, "refused: "))
+				}
+				return dec(High, "inline command passed to cmd.exe")
+			}
+		}
+		return dec(Medium, "runs cmd.exe")
+	}
+	for i, a := range args {
+		if a == "-c" || (strings.HasPrefix(a, "-") && strings.HasSuffix(a, "c") && !strings.HasPrefix(a, "--")) {
+			script := ""
+			if i+1 < len(args) {
+				script = args[i+1]
+			}
+			if d := e.classifyBash(script, workdir); d.Forbidden {
+				return d
+			}
+			return dec(High, "inline shell script passed to "+name)
+		}
+	}
+	return dec(Medium, "runs a shell script file")
+}
+
+func oneOf(s string, vals ...string) bool {
+	for _, v := range vals {
+		if s == v {
+			return true
+		}
+	}
+	return false
+}
+
+func oneOfFold(s string, vals ...string) bool {
+	for _, v := range vals {
+		if strings.EqualFold(s, v) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsFold(args []string, vals ...string) bool {
+	for _, a := range args {
+		if oneOfFold(a, vals...) {
+			return true
+		}
+	}
+	return false
+}
+
+func anyPrefixFold(args []string, prefixes ...string) bool {
+	for _, a := range args {
+		for _, p := range prefixes {
+			if len(a) >= len(p) && strings.EqualFold(a[:len(p)], p) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func anyContains(args []string, sub string) bool {
+	for _, a := range args {
+		if strings.Contains(a, sub) {
+			return true
+		}
+	}
+	return false
+}
 
 func setOf(s ...string) map[string]bool {
 	m := make(map[string]bool, len(s))
@@ -67,8 +178,8 @@ func forbid(reason string) Decision {
 func (e *Engine) classifyArgv(argv []string, workdir string) Decision {
 	exe := argv[0]
 	args := argv[1:]
-	name := filepath.Base(exe)
-	hasSlash := strings.Contains(exe, "/")
+	name := commandName(exe)
+	hasSlash := strings.ContainsAny(exe, `/\`)
 
 	// Credential files are off limits for every command.
 	for _, a := range args {
@@ -76,7 +187,7 @@ func (e *Engine) classifyArgv(argv []string, workdir string) Decision {
 		if i := strings.Index(a, "="); i > 0 && strings.HasPrefix(a, "-") {
 			cand = a[i+1:]
 		}
-		if cand != "" && (strings.Contains(cand, "/") || strings.HasPrefix(cand, "~") || strings.HasPrefix(cand, ".")) && IsSensitive(e.Scope.Resolve(cand, workdir)) {
+		if cand != "" && (strings.ContainsAny(cand, `/\`) || strings.HasPrefix(cand, "~") || strings.HasPrefix(cand, ".") || filepath.IsAbs(cand)) && IsSensitive(e.Scope.Resolve(cand, workdir)) {
 			return forbid(fmt.Sprintf("argument %q refers to a credential or key file", a))
 		}
 	}
@@ -100,19 +211,7 @@ func (e *Engine) classifyArgv(argv []string, workdir string) Decision {
 		return d
 	}
 	if shells[name] {
-		for i, a := range args {
-			if a == "-c" || (strings.HasPrefix(a, "-") && strings.HasSuffix(a, "c") && !strings.HasPrefix(a, "--")) {
-				script := ""
-				if i+1 < len(args) {
-					script = args[i+1]
-				}
-				if why := forbiddenScript(script); why != "" {
-					return forbid(strings.TrimPrefix(why, "refused: "))
-				}
-				return dec(High, "inline shell script passed to "+name)
-			}
-		}
-		return dec(Medium, "runs a shell script file")
+		return e.classifyShellInvocation(name, args, workdir)
 	}
 	if flag, ok := inlineInterp[strings.TrimRight(name, "0123456789.")]; ok && !hasSlash {
 		for _, a := range args {
@@ -140,10 +239,7 @@ func (e *Engine) classifyArgv(argv []string, workdir string) Decision {
 				if strings.HasPrefix(a, "-") {
 					continue
 				}
-				abs := e.Scope.Resolve(a, workdir)
-				home, _ := homeDir()
-				topLevelSystem := IsSystemPath(abs) && !strings.Contains(strings.Trim(abs, "/"), "/")
-				if abs == "/" || abs == home || topLevelSystem || a == "/*" || a == "~/*" {
+				if isProtectedDir(e.Scope.Resolve(a, workdir)) || a == "/*" || a == "~/*" {
 					return forbid(fmt.Sprintf("recursive deletion of %s", a))
 				}
 			}
@@ -152,6 +248,22 @@ func (e *Engine) classifyArgv(argv []string, workdir string) Decision {
 		for _, a := range args {
 			if a == "1" || a == "-1" {
 				return forbid("signalling PID 1 / all processes")
+			}
+		}
+	case name == "diskpart" || (name == "format" && runtime.GOOS == "windows"):
+		return forbid("partitioning or formatting a disk")
+	case name == "diskutil" && (strings.Contains(strings.ToLower(firstNonFlag(args)), "erase") || containsAny(args, "zeroDisk", "randomDisk", "secureErase", "partitionDisk", "reformat")):
+		return forbid("erasing or repartitioning a disk")
+	case (name == "vssadmin" || name == "wbadmin") && containsFold(args, "delete"):
+		return forbid("deleting backups or shadow copies")
+	case name == "taskkill":
+		for i, a := range args {
+			next := ""
+			if i+1 < len(args) {
+				next = strings.ToLower(args[i+1])
+			}
+			if strings.EqualFold(a, "/pid") && next == "4" || strings.EqualFold(a, "/im") && criticalWindowsProcs[strings.TrimSuffix(next, ".exe")] {
+				return forbid("terminating a critical Windows system process")
 			}
 		}
 	case (name == "chmod" || name == "chown") && isRecursive(args):
@@ -231,6 +343,89 @@ func (e *Engine) classifyArgv(argv []string, workdir string) Decision {
 		return withRecovery(dec(High, "changes firewall rules"), "re-apply the previous ruleset")
 	case "env":
 		return dec(Low, "prints environment")
+	case "sysctl":
+		if hasFlag(args, "-w") || anyContains(args, "=") {
+			return withRecovery(dec(High, "sysctl changes kernel parameters"), "set the previous value again")
+		}
+		return dec(Low, "reads kernel parameters")
+	// macOS
+	case "launchctl":
+		if oneOf(sub, "list", "print", "print-disabled", "blame", "procinfo", "version", "managerpid", "hostinfo") {
+			return dec(Low, "read-only launchd query")
+		}
+		return withRecovery(dec(High, "launchctl "+sub+" changes service state"), "run the inverse launchctl command (bootstrap/bootout, enable/disable)")
+	case "diskutil":
+		if oneOf(sub, "list", "info", "activity", "listFilesystems") || (sub == "apfs" && containsAny(args, "list")) {
+			return dec(Low, "read-only disk query")
+		}
+	case "brew":
+		if oneOf(sub, "list", "ls", "info", "search", "outdated", "doctor", "config", "deps", "uses", "leaves", "home", "desc", "--prefix", "--cellar") || (sub == "services" && containsAny(args, "list", "info")) {
+			return dec(Low, "read-only brew query")
+		}
+		return withKey(dec(Medium, "brew "+sub+" changes installed packages or services"), name, sub)
+	case "defaults":
+		if oneOf(sub, "read", "read-type", "domains", "find", "export") {
+			return dec(Low, "reads preferences")
+		}
+		return withKey(dec(Medium, "defaults "+sub+" changes preferences"), name, sub)
+	case "csrutil", "spctl":
+		if containsAny(args, "status", "--status") {
+			return dec(Low, "reads security status")
+		}
+	case "pmset":
+		if hasFlag(args, "-g") {
+			return dec(Low, "reads power settings")
+		}
+	case "softwareupdate":
+		if hasFlag(args, "-l", "--list", "--history") {
+			return dec(Low, "lists updates")
+		}
+	case "log":
+		if oneOf(sub, "show", "stream", "stats") {
+			return dec(Low, "reads system logs")
+		}
+	// Windows (flags are case-insensitive)
+	case "reg":
+		if strings.EqualFold(sub, "query") {
+			return dec(Low, "reads the registry")
+		}
+		return withRecovery(dec(High, "reg "+sub+" changes the registry"), "export the key first (reg export) and re-import it to undo")
+	case "sc":
+		if oneOfFold(sub, "query", "queryex", "qc", "qdescription", "qfailure", "qtriggerinfo", "getdisplayname", "getkeyname", "enumdepend", "sdshow") {
+			return dec(Low, "read-only service query")
+		}
+		return withRecovery(dec(High, "sc "+sub+" changes service state"), "run the inverse sc command (start/stop, config)")
+	case "netsh":
+		if containsFold(args, "show") && !containsFold(args, "set", "add", "delete", "reset", "import") {
+			return dec(Low, "read-only network query")
+		}
+		return withRecovery(dec(High, "netsh changes network or firewall configuration"), "re-apply the previous configuration")
+	case "schtasks":
+		if containsFold(args, "/query") {
+			return dec(Low, "lists scheduled tasks")
+		}
+	case "winget", "choco", "scoop":
+		if oneOfFold(sub, "list", "search", "show", "info", "export", "outdated", "status") {
+			return dec(Low, "package metadata query")
+		}
+	case "wsl":
+		listOnly := len(args) > 0
+		for _, a := range args {
+			listOnly = listOnly && oneOfFold(a, "-l", "--list", "-v", "--verbose", "-q", "--quiet", "--all", "--running", "-o", "--online", "--status", "--version")
+		}
+		if listOnly {
+			return dec(Low, "lists WSL distributions")
+		}
+	case "icacls":
+		if !anyPrefixFold(args, "/grant", "/deny", "/remove", "/reset", "/setowner", "/inheritance", "/restore", "/setintegritylevel", "/substitute") {
+			return dec(Low, "reads permissions")
+		}
+		if containsFold(args, "/t") {
+			return withRecovery(dec(High, "recursive permission change"), "save ACLs first (icacls /save) and restore them")
+		}
+		return withKey(dec(Medium, "changes permissions"), name, "")
+	case "taskkill":
+		return withRecovery(dec(Medium, "terminates processes"), "restart the affected process")
 	case "curl", "wget":
 		return withKey(dec(Medium, name+" performs arbitrary network requests / downloads"), name, "")
 	case "dpkg":
@@ -390,7 +585,7 @@ func (e *Engine) touchesOutside(args []string, workdir string) bool {
 			}
 			cand = a[i+1:]
 		}
-		if strings.HasPrefix(cand, "/") || strings.HasPrefix(cand, "~") || strings.HasPrefix(cand, "../") || cand == ".." {
+		if strings.HasPrefix(cand, "/") || strings.HasPrefix(cand, "~") || strings.HasPrefix(cand, "../") || strings.HasPrefix(cand, `..\`) || cand == ".." || filepath.IsAbs(cand) {
 			if !e.Scope.Contains(e.Scope.Resolve(cand, workdir)) {
 				return true
 			}

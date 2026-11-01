@@ -2,7 +2,7 @@
 
 ScoutClaw installs as one self-contained binary named **`scout`**. After installation you can run `scout` from any directory.
 
-Supported platform: **Linux** (tested on Ubuntu). macOS and Windows binaries compile but are untested, and the built-in system diagnostics are Linux-only.
+Supported platforms: **Linux**, **macOS** and **Windows** (amd64 and arm64). The built-in system diagnostics (`sys_info`, `process_list`) are Linux-only; on macOS and Windows the agent uses native tools through the shell instead.
 
 > **Upgrading from the first version?** The original single-file build was also installed as `scout` / `scoutclaw`. Installing the new version to the same directory overwrites `scout`; remove a stale `scoutclaw` binary (`rm ~/.local/bin/scoutclaw`) so you don't run the old one by accident. Check with `command -v scout` and `scout version`.
 
@@ -42,20 +42,30 @@ go build -o ~/.local/bin/scout ./cmd/scout
 
 ### C. From a GitHub release (no Go needed)
 
-Works once a release has been published (a `vX.Y.Z` tag built with GoReleaser). Linux and macOS, amd64 and arm64:
+Works once a release has been published (a `vX.Y.Z` tag built with GoReleaser). amd64 and arm64.
+
+macOS / Linux:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/sshuvoo/scout-claw/main/install.sh | sh
 ```
+
+Windows, from PowerShell (from CMD, wrap it: `powershell -NoProfile -ExecutionPolicy Bypass -Command "irm ... | iex"`):
+
+```powershell
+irm https://raw.githubusercontent.com/sshuvoo/scout-claw/main/install.ps1 | iex
+```
+
+`install.ps1` installs `%USERPROFILE%\.local\bin\scout.exe` and adds that folder to your user PATH (set `SCOUT_NO_MODIFY_PATH=1` to skip). It honours the same `SCOUT_VERSION` and `SCOUT_INSTALL_DIR` variables as `install.sh`. Install [Git for Windows](https://git-scm.com/downloads/win) as well so the agent can run bash scripts.
 
 The script downloads the archive for your OS and architecture, verifies its SHA-256 checksum against `checksums.txt`, and installs `scout` to `~/.local/bin`. Options (environment variables):
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `SCOUT_VERSION` | latest release | Install a specific tag, e.g. `v0.1.0` |
-| `SCOUT_INSTALL_DIR` | `~/.local/bin` | Target directory |
+| `SCOUT_INSTALL_DIR` | `~/.local/bin` (Windows: `%USERPROFILE%\.local\bin`) | Target directory |
 
-Prefer to inspect first? Download `install.sh`, read it, then run `sh install.sh`.
+Prefer to inspect first? Download `install.sh` / `install.ps1`, read it, then run `sh install.sh` / `powershell -File install.ps1`.
 
 ## 2. Make sure the command is on your PATH
 
@@ -125,6 +135,12 @@ scout update --version v0.1.2   # a specific release
 
 ```bash
 make uninstall                    # or: rm ~/.local/bin/scout
+```
+
+Windows (PowerShell):
+
+```powershell
+Remove-Item "$HOME\.local\bin\scout.exe*"
 ```
 
 Optional cleanup of data ScoutClaw created (sessions, audit log, file backups, stored key):

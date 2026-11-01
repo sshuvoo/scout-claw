@@ -1,6 +1,7 @@
 #!/bin/sh
-# Install the `scout` command from a GitHub release.
+# Install the `scout` command from a GitHub release (Linux and macOS).
 #   curl -fsSL https://raw.githubusercontent.com/sshuvoo/scout-claw/main/install.sh | sh
+# Windows: use install.ps1 instead (see README).
 # Env: SCOUT_VERSION (default: latest), SCOUT_INSTALL_DIR (default: ~/.local/bin)
 set -eu
 
@@ -8,7 +9,14 @@ REPO="sshuvoo/scout-claw"
 DIR="${SCOUT_INSTALL_DIR:-$HOME/.local/bin}"
 
 os=$(uname -s | tr '[:upper:]' '[:lower:]')
-case "$os" in linux|darwin) ;; *) echo "unsupported OS: $os (use 'go install' or build from source)" >&2; exit 1;; esac
+case "$os" in
+  linux|darwin) ;;
+  mingw*|msys*|cygwin*)
+    echo "on Windows, install from PowerShell instead:" >&2
+    echo "  irm https://raw.githubusercontent.com/$REPO/main/install.ps1 | iex" >&2
+    exit 1 ;;
+  *) echo "unsupported OS: $os (use 'go install' or build from source)" >&2; exit 1 ;;
+esac
 case "$(uname -m)" in
   x86_64|amd64) arch=amd64 ;;
   aarch64|arm64) arch=arm64 ;;
@@ -38,5 +46,10 @@ tar -xzf "$tmp/$name" -C "$tmp" scout
 mkdir -p "$DIR"
 install -m 0755 "$tmp/scout" "$DIR/scout"
 echo "installed $DIR/scout"
-case ":$PATH:" in *":$DIR:"*) ;; *) echo "add to your shell profile:  export PATH=\"$DIR:\$PATH\"";; esac
+case ":$PATH:" in
+  *":$DIR:"*) ;;
+  *)
+    case "${SHELL:-}" in */zsh) rc="~/.zshrc" ;; */bash) rc="~/.bashrc" ;; *) rc="your shell profile" ;; esac
+    echo "add $DIR to your PATH, e.g. append to $rc:  export PATH=\"$DIR:\$PATH\"" ;;
+esac
 echo "next: run  scout setup  (stores your OpenAI API key), then  scout doctor --online"

@@ -19,6 +19,7 @@ type Info struct {
 	Systemd        bool   `json:"systemd"`
 	IsRoot         bool   `json:"is_root"`
 	FullySupported bool   `json:"fully_supported"`
+	Shells         Shells `json:"shells"`
 }
 
 func Detect() Info {
@@ -27,8 +28,9 @@ func Detect() Info {
 		OS:             runtime.GOOS,
 		Arch:           runtime.GOARCH,
 		Hostname:       host,
-		IsRoot:         os.Geteuid() == 0,
+		IsRoot:         isElevated(),
 		FullySupported: runtime.GOOS == "linux",
+		Shells:         DetectShells(),
 	}
 	if runtime.GOOS == "linux" {
 		i.Distro = osReleaseName()
@@ -36,7 +38,7 @@ func Detect() Info {
 			i.Systemd = true
 		}
 	}
-	for _, pm := range []string{"apt-get", "dnf", "yum", "pacman", "zypper", "apk", "brew"} {
+	for _, pm := range []string{"apt-get", "dnf", "yum", "pacman", "zypper", "apk", "brew", "winget", "choco", "scoop"} {
 		if _, err := exec.LookPath(pm); err == nil {
 			i.PackageManager = pm
 			break

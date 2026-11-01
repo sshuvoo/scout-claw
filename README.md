@@ -20,11 +20,31 @@ The model only *proposes*. The runtime validates, authorizes, executes and verif
 
 ## Quick start
 
+Install the `scout` command (prebuilt binary, checksum-verified, no Go needed):
+
+**macOS / Linux**
+
 ```bash
-git clone https://github.com/sshuvoo/scout-claw.git && cd scout-claw
-make install                                   # installs the global `scout` command (~/.local/bin)
+curl -fsSL https://raw.githubusercontent.com/sshuvoo/scout-claw/main/install.sh | sh
+```
+
+**Windows (PowerShell)**
+
+```powershell
+irm https://raw.githubusercontent.com/sshuvoo/scout-claw/main/install.ps1 | iex
+```
+
+**Windows (CMD)**
+
+```bat
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/sshuvoo/scout-claw/main/install.ps1 | iex"
+```
+
+Then, on any OS:
+
+```bash
 scout setup                                    # paste your OpenAI API key once (hidden input)
-scout doctor --online                          # verify key, model and connectivity
+scout doctor --online                          # verify key, model, shells and connectivity
 scout run --approval readonly "How much disk space and memory is free?"
 ```
 
@@ -32,13 +52,26 @@ scout run --approval readonly "How much disk space and memory is free?"
 
 You need an OpenAI API key (`OPENAI_API_KEY`, Responses API, default model `gpt-5.5`) and one of:
 
-| Method | Needs | Command |
-|---|---|---|
-| Make | Go 1.27.1+, make | `make install` (installs `~/.local/bin/scout`; `sudo make install PREFIX=/usr/local` for system-wide) |
-| Go only | Go 1.27.1+ | `go install ./cmd/scout` (installs `~/go/bin/scout`) |
-| Release script | curl, a published release | `curl -fsSL https://raw.githubusercontent.com/sshuvoo/scout-claw/main/install.sh \| sh` |
+| Method | OS | Needs | Command |
+|---|---|---|---|
+| Release script | macOS, Linux | curl | `curl -fsSL https://raw.githubusercontent.com/sshuvoo/scout-claw/main/install.sh \| sh` |
+| Release script | Windows | PowerShell 5.1+ | `irm https://raw.githubusercontent.com/sshuvoo/scout-claw/main/install.ps1 \| iex` |
+| Make | macOS, Linux | Go 1.27.1+, make | `make install` (installs `~/.local/bin/scout`; `sudo make install PREFIX=/usr/local` for system-wide) |
+| Go only | any | Go 1.27.1+ | `go install ./cmd/scout` (installs `~/go/bin/scout`, `%USERPROFILE%\go\bin\scout.exe` on Windows) |
 
-Make sure the install directory is on your `PATH`, then check with `scout version`. Run `scout setup` to store your API key (saved to `~/.scoutclaw.env`, mode 600, works from any directory). A project-local `./.env` only applies when you run `scout` from that directory.
+Where the scripts install:
+
+| | macOS / Linux (`install.sh`) | Windows (`install.ps1`) |
+|---|---|---|
+| Binary | `~/.local/bin/scout` | `%USERPROFILE%\.local\bin\scout.exe` |
+| PATH | prints the line to add to `~/.zshrc` / `~/.bashrc` if needed | adds the folder to your user PATH (opt out with `SCOUT_NO_MODIFY_PATH=1`) |
+| Options | `SCOUT_VERSION=v0.6.2`, `SCOUT_INSTALL_DIR=...` | same: `$env:SCOUT_VERSION`, `$env:SCOUT_INSTALL_DIR` |
+
+Both scripts download the archive for your OS and CPU (amd64 or arm64) from the latest GitHub release and refuse to install if its SHA-256 does not match `checksums.txt`. Prefer to read a script before running it? Download it, inspect it, then run `sh install.sh` or `powershell -File install.ps1`.
+
+On Windows, also install [Git for Windows](https://git-scm.com/downloads/win) so the agent can run bash scripts (`shell_script`) in addition to PowerShell (`shell_powershell`); `scout doctor` shows which shells were found.
+
+Open a new terminal, check with `scout version`, then run `scout setup` to store your API key (saved to `~/.scoutclaw.env`, mode 600, works from any directory). A project-local `./.env` only applies when you run `scout` from that directory. Later, `scout update` upgrades in place on every OS.
 
 Full guide, including PATH setup, upgrading from the first version, updating, uninstalling and troubleshooting: **[docs/installation.md](docs/installation.md)**.
 
@@ -91,7 +124,7 @@ Chat/interactive tips: Ctrl-C cancels the running task (children are terminated)
 Tools exposed to the model (all go through the same pipeline):
 
 - **Filesystem:** `fs_list`, `fs_read` (line ranges, tail mode), `fs_stat`, `fs_search` (regex + name glob), `fs_write`, `fs_patch` (exact-match edit). Edits show a diff before approval, keep a backup, and write atomically.
-- **Shell:** `shell_exec` (one executable + argument array, **no shell**), `shell_script` (`sh -c`, always high risk).
+- **Shell:** `shell_exec` (one executable + argument array, **no shell**), `shell_script` (bash: the system bash on Linux/macOS, Git Bash on Windows; always high risk), `shell_powershell` (Windows only: PowerShell 7, falling back to Windows PowerShell 5.1; always high risk). Override discovery with `SCOUT_BASH_PATH` / `SCOUT_POWERSHELL_PATH`; `scout doctor` shows what was found.
 - **System (Linux):** `sys_info` (OS, kernel, load, memory, swap, disk and inode usage), `process_list` (CPU/memory top, secrets in command lines masked), `env_list` (secret values masked), `dev_runtimes`. Service state and logs use `shell_exec` with `systemctl status` / `journalctl`.
 - **Network:** `net_dns`, `net_connect` (TCP), `net_http` (GET/HEAD, no credentials, bounded).
 - **Bookkeeping:** `update_plan`, `finish`.
@@ -104,8 +137,8 @@ Tools exposed to the model (all go through the same pipeline):
 |---|---|---|---|---|
 | Low | `ls`, `df`, `git status`, `systemctl status`, `docker ps`, reading files, bounded network probes | runs | runs | runs |
 | Medium | `go test`, `npm install`, `docker restart`, edits inside the workspace, unknown commands | asks (`a` = allow this kind for the session) | runs | denied |
-| High | writes outside the workspace, `rm -r`, `systemctl restart`, `apt`, `git push`, `sudo`, firewall/permission changes, any `shell_script` | asks (y/n only) | asks | denied |
-| Refused | `rm -rf /` or `~`, `mkfs`/`dd` to devices, killing PID 1, piping downloads into a shell, reading SSH/GPG/cloud credential files and `/etc/shadow` | never runs | never | never |
+| High | writes outside the workspace, `rm -r`, `systemctl restart`, `apt`, `git push`, `sudo`, firewall/permission changes, any `shell_script` / `shell_powershell` | asks (y/n only) | asks | denied |
+| Refused | `rm -rf /` or `~`, `mkfs`/`dd` to devices, killing PID 1, piping downloads into a shell, reading SSH/GPG/cloud credential files and `/etc/shadow`; on Windows/macOS also `diskpart`/`format`/`diskutil erase*`, deleting shadow copies, `iex` of downloaded content, encoded PowerShell, killing critical system processes | never runs | never | never |
 
 Further guarantees:
 

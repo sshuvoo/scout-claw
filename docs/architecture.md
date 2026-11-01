@@ -22,7 +22,15 @@ vice-versa. Tool packages import `policy` only for `Scope` (path resolution).
   strictly (unknown fields rejected) and validated before policy sees them. Malformed or unknown calls become error
   observations; the model can recover.
 - **No shell by default.** `shell_exec` takes an executable and an argument array, which removes injection through
-  quoting. `shell_script` exists for genuine shell syntax and is always high risk.
+  quoting. `shell_script` (bash) and, on Windows, `shell_powershell` exist for genuine shell syntax and are always
+  high risk. Like other coding agents, ScoutClaw uses the real shell rather than an embedded interpreter: system bash on
+  Linux/macOS, Git Bash on Windows (never `System32\bash.exe`, the WSL launcher), and PowerShell 7 before 5.1.
+- **Bash scripts are parsed, not pattern-matched.** `mvdan.cc/sh` parses each `shell_script` (and every `bash -c`
+  argument) into an AST; every command, including ones in pipelines, functions and `$(...)`, goes through the same
+  argv classifier as `shell_exec`, after quote removal (`r''m` is `rm`). Redirection targets are checked for credential
+  files. PowerShell has no Go parser, so its scripts are checked with patterns only.
+- **Process trees.** Timeouts and Ctrl-C kill the whole tree: a process group on Unix, a Job Object on Windows (which
+  also catches grandchildren whose parent already exited).
 - **Policy is heuristic but fail-safe.** Unknown commands are medium, unknown tools are refused, forbidden operations
   cannot be approved. Wrappers (`env`, `timeout`, `nice`, …) are unwrapped and the inner command is classified; `sudo`
   is high and its inner command is checked for forbidden operations.

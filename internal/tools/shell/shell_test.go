@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -24,12 +25,21 @@ func runner(t *testing.T) (Runner, tools.Tool) {
 	return r, nil
 }
 
+// unixOnly skips tests that drive POSIX tools (sh, sleep, seq, env); Windows
+// has its own coverage in shell_windows_test.go.
+func unixOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses POSIX tools")
+	}
+}
+
 func call(t *testing.T, tl tools.Tool, ctx context.Context, in map[string]any) (tools.Result, error) {
 	b, _ := json.Marshal(in)
 	return tl.Execute(ctx, b)
 }
 
 func TestExecCapturesOutputAndExitCodes(t *testing.T) {
+	unixOnly(t)
 	_, tl := runner(t)
 	res, err := call(t, tl, context.Background(), map[string]any{"command": "sh", "args": []string{"-c", "echo out; echo err >&2"}})
 	if err != nil || !res.OK() || !strings.Contains(res.Output, "out") || !strings.Contains(res.Output, "err") {
@@ -50,6 +60,7 @@ func TestExecMissingExecutable(t *testing.T) {
 }
 
 func TestExecDoesNotInterpretShellSyntax(t *testing.T) {
+	unixOnly(t)
 	_, tl := runner(t)
 	res, _ := call(t, tl, context.Background(), map[string]any{"command": "echo", "args": []string{"a; echo injected", "$HOME"}})
 	if !strings.Contains(res.Output, "a; echo injected $HOME") {
@@ -58,6 +69,7 @@ func TestExecDoesNotInterpretShellSyntax(t *testing.T) {
 }
 
 func TestExecTimeoutKillsProcessGroup(t *testing.T) {
+	unixOnly(t)
 	_, tl := runner(t)
 	marker := filepath.Join(t.TempDir(), "child-survived")
 	start := time.Now()
@@ -80,6 +92,7 @@ func TestExecTimeoutKillsProcessGroup(t *testing.T) {
 }
 
 func TestExecCancellation(t *testing.T) {
+	unixOnly(t)
 	_, tl := runner(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { time.Sleep(300 * time.Millisecond); cancel() }()
@@ -94,6 +107,7 @@ func TestExecCancellation(t *testing.T) {
 }
 
 func TestOutputTruncationKeepsHeadAndTail(t *testing.T) {
+	unixOnly(t)
 	_, tl := runner(t)
 	res, err := call(t, tl, context.Background(), map[string]any{"command": "sh", "args": []string{"-c", "echo HEAD; seq 1 20000; echo TAIL"}})
 	if err != nil {
@@ -108,6 +122,7 @@ func TestOutputTruncationKeepsHeadAndTail(t *testing.T) {
 }
 
 func TestChildEnvStripsAPIKey(t *testing.T) {
+	unixOnly(t)
 	t.Setenv("OPENAI_API_KEY", "sk-should-not-leak-1234567890")
 	r, tl := runner(t)
 	r.StripEnv = []string{"OPENAI_API_KEY"}
