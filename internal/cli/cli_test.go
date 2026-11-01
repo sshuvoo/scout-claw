@@ -258,6 +258,7 @@ func TestSetupAcceptsPipedKey(t *testing.T) {
 	h := newHarness(t, "sk-piped-key-1234567890\n")
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
 	t.Setenv(config.EnvAPIKey, "")
 	if code := h.run("setup"); code != 0 {
 		t.Fatalf("%s", h.errb.String())

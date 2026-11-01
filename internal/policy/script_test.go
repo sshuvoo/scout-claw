@@ -134,3 +134,22 @@ func TestCaseInsensitiveCommandNames(t *testing.T) {
 		t.Fatalf("RM resolves to rm on %s: %+v", runtime.GOOS, d)
 	}
 }
+
+func TestPosixToWindows(t *testing.T) {
+	for in, want := range map[string]string{
+		"/":              `C:/`,
+		"/etc/hosts":     `C:/etc/hosts`,
+		"/c/Users/me":    `C:\Users/me`,
+		"/d":             `D:\`,
+		"/data":          `C:/data`,
+		`\Windows`:       `C:\Windows`,
+		`D:\x`:           `D:\x`,
+		"rel/path":       "rel/path",
+		`\\server\share`: `\\server\share`,
+		"//server/share": "//server/share",
+	} {
+		if got := posixToWindows(in, "C:"); got != want {
+			t.Errorf("posixToWindows(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

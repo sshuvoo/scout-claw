@@ -3,6 +3,7 @@ package session
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -33,7 +34,7 @@ func TestSaveLoadListLatest(t *testing.T) {
 	if last, _ := Latest(dir); last.ID != b.ID {
 		t.Fatal("latest wrong")
 	}
-	if st, _ := os.Stat(filepath.Join(dir, a.ID+".json")); st.Mode().Perm() != 0o600 {
+	if st, _ := os.Stat(filepath.Join(dir, a.ID+".json")); runtime.GOOS != "windows" && st.Mode().Perm() != 0o600 { // Windows has no Unix modes
 		t.Fatalf("session files must be private, got %v", st.Mode())
 	}
 }

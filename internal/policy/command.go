@@ -36,6 +36,28 @@ var systemHigh = setOf("apt", "apt-get", "aptitude", "dpkg", "dnf", "yum", "rpm"
 	"reg", "sc", "netsh", "schtasks", "winget", "choco", "scoop", "msiexec", "bcdedit", "takeown", "cipher", "wsl", "dism", "sfc", "vssadmin", "wbadmin", "wevtutil", "setx")
 var fileMutators = setOf("rm", "rmdir", "mv", "cp", "mkdir", "touch", "ln", "chmod", "chown", "chgrp", "truncate", "tee", "install", "rsync", "unlink", "sed", "patch")
 
+// windowsNative are Windows programs that take "/X" switches. On Windows
+// their switches must not be mistaken for rooted paths ("/PID" is not C:\PID).
+var windowsNative = setOf("taskkill", "tasklist", "icacls", "takeown", "sc", "reg", "netsh", "schtasks", "ipconfig", "findstr",
+	"where", "robocopy", "xcopy", "attrib", "shutdown", "systeminfo", "driverquery", "cipher", "wevtutil", "dism", "sfc", "vssadmin", "wbadmin", "bcdedit", "msiexec", "cmd")
+
+var windowsSwitch = regexp.MustCompile(`^/[A-Za-z?][A-Za-z0-9:_-]*$`)
+
+// withoutSwitches returns argv's arguments minus Windows "/X" switches when
+// argv runs a Windows-native program on Windows.
+func withoutSwitches(argv []string) []string {
+	if runtime.GOOS != "windows" || !windowsNative[commandName(argv[0])] {
+		return argv[1:]
+	}
+	var out []string
+	for _, a := range argv[1:] {
+		if !windowsSwitch.MatchString(a) {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 // criticalWindowsProcs crash or log off the system when terminated.
 var criticalWindowsProcs = setOf("system", "csrss", "wininit", "winlogon", "lsass", "smss", "services", "svchost")
 

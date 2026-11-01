@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -88,7 +89,7 @@ func TestSetEnvFileReplacesAndKeepsOthers(t *testing.T) {
 	if string(b) != want {
 		t.Fatalf("got %q", b)
 	}
-	if st, _ := os.Stat(p); st.Mode().Perm() != 0o600 {
+	if st, _ := os.Stat(p); runtime.GOOS != "windows" && st.Mode().Perm() != 0o600 { // Windows has no Unix modes
 		t.Fatalf("mode %v", st.Mode())
 	}
 	if SetEnvFile(p, "BAD KEY", "v") == nil || SetEnvFile(p, "K", "a\nb") == nil {

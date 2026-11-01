@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"scoutclaw/internal/config"
@@ -49,7 +50,7 @@ func TestShellRiskClassification(t *testing.T) {
 		{"sudo", []string{"ls"}, High, false},
 		{"sudo", []string{"rm", "-rf", "/"}, High, true},
 		{"rm", []string{"-rf", "/"}, High, true},
-		{"rm", []string{"-rf", "/etc"}, High, true},
+		{"rm", []string{"-rf", "/etc"}, High, runtime.GOOS != "windows"}, // C:\etc on Windows: outside, not a system dir
 		{"rm", []string{"-rf", "~"}, High, true},
 		{"rm", []string{"-rf", "build"}, High, false},
 		{"rm", []string{"old.log"}, Medium, false},

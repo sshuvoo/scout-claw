@@ -41,6 +41,9 @@ func (s Scope) Resolve(p, base string) string {
 			p = filepath.Join(home, strings.TrimPrefix(p, "~"))
 		}
 	}
+	if runtime.GOOS == "windows" {
+		p = posixToWindows(p, filepath.VolumeName(s.Root))
+	}
 	if !filepath.IsAbs(p) {
 		if base == "" {
 			base = s.Root
@@ -49,6 +52,26 @@ func (s Scope) Resolve(p, base string) string {
 	}
 	return realPath(filepath.Clean(p))
 }
+
+// posixToWindows maps a rooted path without a drive letter, as Git Bash and
+// models write them, to an absolute Windows path: "/c/Users" (MSYS style) is
+// C:\Users, and any other rooted path ("/", "/etc") is taken on the volume of
+// the workspace. Without this, filepath.IsAbs("/") is false on Windows and
+// "rm -rf /" would resolve inside the workspace.
+func posixToWindows(p, volume string) string {
+	if p == "" || (p[0] != '/' && p[0] != '\\') || strings.HasPrefix(p, `\\`) || strings.HasPrefix(p, "//") {
+		return p // relative, drive-qualified, or UNC
+	}
+	if len(p) >= 2 && isASCIILetter(p[1]) && (len(p) == 2 || p[2] == '/' || p[2] == '\\') {
+		return strings.ToUpper(p[1:2]) + `:\` + p[min(len(p), 3):]
+	}
+	if volume == "" {
+		return p
+	}
+	return volume + p
+}
+
+func isASCIILetter(c byte) bool { return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' }
 
 // Contains reports whether the already-resolved absolute path is inside the workspace.
 func (s Scope) Contains(abs string) bool {

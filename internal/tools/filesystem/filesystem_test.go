@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -89,7 +90,7 @@ func TestPatchWritesDiffAndBackup(t *testing.T) {
 	if string(got) != "port=8080\nmode=dev\n" {
 		t.Fatalf("content: %q", got)
 	}
-	if st, _ := os.Stat(p); st.Mode().Perm() != 0o640 {
+	if st, _ := os.Stat(p); runtime.GOOS != "windows" && st.Mode().Perm() != 0o640 { // Windows has no Unix modes
 		t.Fatalf("mode not preserved: %v", st.Mode())
 	}
 	bk := r.Metadata["backup"]

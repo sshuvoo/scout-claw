@@ -140,7 +140,7 @@ func (e *Engine) classifyExec(input json.RawMessage) Decision {
 	argv := append([]string{in.Command}, in.Args...)
 	d := e.classifyArgv(argv, workdir)
 	d.Effects = coalesce(d.Effects, "runs "+strings.Join(argv, " "))
-	if d.Risk == Medium && !d.Forbidden && (!e.Scope.Contains(workdir) || e.touchesOutside(argv[1:], workdir)) {
+	if d.Risk == Medium && !d.Forbidden && (!e.Scope.Contains(workdir) || e.touchesOutside(withoutSwitches(argv), workdir)) {
 		d.Risk, d.Outside = High, true
 		d.Reason += "; operates on paths outside the workspace"
 	}

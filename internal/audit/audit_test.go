@@ -3,6 +3,7 @@ package audit
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -23,7 +24,7 @@ func TestLogRedactsAndFilters(t *testing.T) {
 	if strings.Contains(string(raw), "abcdefghijklmnop") || strings.Contains(string(raw), "exact-secret-value") {
 		t.Fatalf("secret on disk: %s", raw)
 	}
-	if st, _ := os.Stat(p); st.Mode().Perm() != 0o600 {
+	if st, _ := os.Stat(p); runtime.GOOS != "windows" && st.Mode().Perm() != 0o600 { // Windows has no Unix modes
 		t.Fatalf("audit log must be private: %v", st.Mode())
 	}
 	ev, err := Read(p, "s1")
