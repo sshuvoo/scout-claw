@@ -36,6 +36,9 @@ type Request struct {
 	ToolOutputs  []ToolOutput
 	Tools        []ToolSpec
 	PreviousID   string
+	// CompactAt asks the provider to compact the conversation once its context
+	// passes this many tokens (0: never). Providers that cannot do this ignore it.
+	CompactAt int64
 
 	// OnDelta, if set, is called with each chunk of output text as it streams
 	// in, in order, before Generate returns. It must be cheap and non-blocking.
@@ -53,6 +56,11 @@ type Response struct {
 	ToolCalls  []ToolCall
 	Usage      Usage
 	Incomplete string // non-empty if the model stopped early (e.g. max_output_tokens)
+	// Compacted: the provider compacted earlier turns for this response. OpenAI
+	// reports it on every turn while the chained conversation stays past the
+	// threshold, and keeps the compacted context itself when chaining with
+	// previous_response_id (verified by TestLiveOpenAICompaction).
+	Compacted bool
 }
 
 type Provider interface {

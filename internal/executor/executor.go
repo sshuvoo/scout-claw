@@ -342,6 +342,16 @@ func Summarize(c Call) string {
 	case "fs_undo":
 		n, _ := m["steps"].(float64)
 		return strings.TrimSpace(fmt.Sprintf("fs_undo %d %s", max(int(n), 1), str("path")))
+	case "proc_start":
+		parts := []string{"proc_start", str("command")}
+		if a, ok := m["args"].([]any); ok {
+			for _, v := range a {
+				parts = append(parts, fmt.Sprint(v))
+			}
+		}
+		return strings.Join(parts, " ")
+	case "proc_output", "proc_stop":
+		return c.Name + " " + str("id")
 	case "fs_apply_patch":
 		var files []string
 		for _, l := range strings.Split(str("patch"), "\n") {

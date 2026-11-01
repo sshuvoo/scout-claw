@@ -26,7 +26,8 @@ type Options struct {
 	ToolTimeout time.Duration
 	StripEnv    []string
 	Tracker     *verify.Tracker
-	Shells      platform.Shells // script interpreters; an empty path omits that tool
+	Shells      platform.Shells   // script interpreters; an empty path omits that tool
+	Background  *shell.Background // session's background processes; created if nil
 }
 
 // FS returns the filesystem tool set for o; the CLI also uses it for /undo.
@@ -39,13 +40,23 @@ func FS(o Options) filesystem.FS {
 		MaxReadLen: read, State: o.Files}
 }
 
+// Runner returns the shell runner for o; background processes use the same settings.
+func Runner(o Options) shell.Runner {
+	return shell.Runner{Scope: o.Scope, MaxOutput: o.MaxOutput, DefaultTimeout: o.ToolTimeout, StripEnv: o.StripEnv,
+		Bash: o.Shells.Bash, PowerShell: o.Shells.PowerShell}
+}
+
 // New returns the registry and the per-task state shared with the task tools.
 func New(o Options) (*tools.Registry, *task.State) {
 	reg := tools.NewRegistry()
 	state := task.NewState(o.Tracker)
 	reg.MustRegister(FS(o).Tools()...)
-	reg.MustRegister(shell.Runner{Scope: o.Scope, MaxOutput: o.MaxOutput, DefaultTimeout: o.ToolTimeout, StripEnv: o.StripEnv,
-		Bash: o.Shells.Bash, PowerShell: o.Shells.PowerShell}.Tools()...)
+	reg.MustRegister(Runner(o).Tools()...)
+	bg := o.Background
+	if bg == nil {
+		bg = &shell.Background{Runner: Runner(o)}
+	}
+	reg.MustRegister(bg.Tools()...)
 	reg.MustRegister(system.Tools()...)
 	reg.MustRegister(network.Tools()...)
 	reg.MustRegister(state.Tools()...)

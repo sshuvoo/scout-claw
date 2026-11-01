@@ -95,6 +95,10 @@ func (e *Engine) Classify(tool string, input json.RawMessage) Decision {
 			Recovery: "the current contents are backed up before they are replaced", Key: "fs_undo:workspace"}
 	case "shell_exec":
 		return e.classifyExec(input)
+	case "proc_start":
+		return e.classifyProcStart(input)
+	case "proc_output", "proc_list", "proc_stop":
+		return Decision{Risk: Low, Reason: "inspects or stops a background process ScoutClaw started"}
 	case "shell_script", "shell_powershell":
 		return e.classifyScript(tool, input)
 	case "sys_info", "process_list", "env_list", "dev_runtimes",
@@ -322,6 +326,33 @@ func (e *Engine) classifyExec(input json.RawMessage) Decision {
 		d.Risk, d.Outside = High, true
 		d.Reason += "; operates on paths outside the workspace"
 	}
+	return d
+}
+
+// classifyProcStart rates the command like shell_exec, but never below medium:
+// a background process keeps running (and may listen on ports) after the call.
+func (e *Engine) classifyProcStart(input json.RawMessage) Decision {
+	d := e.classifyExec(input)
+	if d.Risk == Low {
+		d.Risk = Medium
+		d.Reason = "starts a long-running background process"
+	}
+	d.Key = ""
+	if d.Risk == Medium && !d.Forbidden && !d.Outside {
+		// "Allow for this session" covers the same program and subcommand only.
+		var in execInput
+		_ = json.Unmarshal(input, &in)
+		key := "proc_start:" + filepath.Base(in.Command)
+		for _, a := range in.Args {
+			if !strings.HasPrefix(a, "-") {
+				key += " " + a
+				break
+			}
+		}
+		d.Key = key
+	}
+	d.Effects = "keeps running in the background until proc_stop or ScoutClaw exits; " + d.Effects
+	d.Recovery = coalesce(d.Recovery, "proc_stop stops it and everything it spawned")
 	return d
 }
 

@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -210,13 +211,14 @@ func TestFlagsOverrideEnvironment(t *testing.T) {
 }
 
 func TestSlashCommandsInChat(t *testing.T) {
-	h := newHarness(t, "/help\n/approval readonly\n/approval bogus\n/model gpt-test\n/model\n/config\n/status\n/nope\n/key\n/exit\n")
+	h := newHarness(t, "/help\n/approval readonly\n/approval bogus\n/model gpt-test\n/model\n/config\n/status\n/procs\n/nope\n/key\n/exit\n")
 	if code := h.run("chat"); code != 0 {
 		t.Fatal(h.errb.String())
 	}
 	out := h.out.String()
 	for _, want := range []string{"/approval [mode]", "approval is now readonly", "unknown mode", "model is now gpt-test", "model: gpt-test",
-		"SCOUTCLAW_MODEL", "unknown command /nope", "/key needs an interactive terminal", "Bye from ScoutClaw"} {
+		"SCOUTCLAW_MODEL", "unknown command /nope", "/key needs an interactive terminal", "Bye from ScoutClaw",
+		"0 tokens in the conversation (compacts at 200000 tokens)", "SCOUTCLAW_COMPACT_AT", "no background processes", "/procs [stop <id>]"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}
@@ -342,5 +344,27 @@ func TestEditsModeThenDiffAndUndoInChat(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(conf); string(b) != "port=80\n" {
 		t.Fatalf("undo did not restore the file: %q", b)
+	}
+}
+
+func TestBackgroundProcessesInChatStopOnExit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses the sleep command")
+	}
+	h := newHarness(t, "start a server\n/procs\n/procs stop p9\n/exit\n",
+		llm.Calls(llm.ToolCall{ID: "1", Name: "proc_start", Arguments: `{"command":"sleep","args":["30"],"name":"srv","wait_sec":1}`}),
+		llm.Reply("started"),
+	)
+	if code := h.run("chat", "--approval", "auto"); code != 0 {
+		t.Fatalf("exit %d: %s", code, h.errb.String())
+	}
+	out := h.out.String()
+	for _, want := range []string{"proc_start sleep 30", "p1 [srv]  running", "no background process \"p9\""} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(h.errb.String(), "stopped 1 background process(es)") {
+		t.Errorf("exiting must stop background processes; stderr:\n%s", h.errb.String())
 	}
 }

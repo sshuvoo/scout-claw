@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -258,5 +259,66 @@ func TestPlainAnswerAfterChangesIsMarkedUnverified(t *testing.T) {
 	res := r.a.Run(context.Background(), "x")
 	if res.Verify != verify.Unverified {
 		t.Fatalf("a confident sentence is not evidence: %+v", res)
+	}
+}
+
+func TestCompactionRestatesTaskAndPlanOnce(t *testing.T) {
+	plan := map[string]any{"steps": []map[string]any{{"step": "find the port setting", "status": "in_progress"}}, "hypothesis": "port is wrong"}
+	var r *rig
+	r = newRig(t, config.ApprovalAuto,
+		func(req llm.Request) (*llm.Response, error) {
+			if req.CompactAt != 150000 {
+				t.Errorf("first request CompactAt = %d", req.CompactAt)
+			}
+			return &llm.Response{ToolCalls: []llm.ToolCall{tc("1", "update_plan", plan)}, Usage: llm.Usage{InputTokens: 170000}}, nil
+		},
+		func(req llm.Request) (*llm.Response, error) {
+			// the plan was set by this turn's tool call; the compaction came with the next response
+			return &llm.Response{ToolCalls: []llm.ToolCall{tc("2", "update_plan", plan)}, Compacted: true, Usage: llm.Usage{InputTokens: 40000}}, nil
+		},
+		func(req llm.Request) (*llm.Response, error) {
+			for _, want := range []string{"were compacted", "fix the port in app.conf", "[in_progress] find the port setting", "Hypothesis: port is wrong", "fs_changes"} {
+				if !strings.Contains(req.UserText, want) {
+					t.Errorf("reminder missing %q:\n%s", want, req.UserText)
+				}
+			}
+			if len(req.ToolOutputs) != 1 || req.CompactAt != 150000 {
+				t.Errorf("tool outputs must still be delivered with the reminder: %+v", req)
+			}
+			// the server keeps reporting compaction on every turn past the threshold
+			return &llm.Response{ToolCalls: []llm.ToolCall{tc("3", "update_plan", plan)}, Compacted: true, Usage: llm.Usage{InputTokens: 42000}}, nil
+		},
+		func(req llm.Request) (*llm.Response, error) {
+			if req.UserText != "" {
+				t.Errorf("the reminder must be sent only once per task, got %q", req.UserText)
+			}
+			return &llm.Response{Text: "done", Usage: llm.Usage{InputTokens: 43000}}, nil
+		},
+	)
+	r.a.Limits.CompactAt = 150000
+	res := r.a.Run(context.Background(), "fix the port in app.conf")
+	if res.Status != StatusCompleted || r.a.ContextTokens != 43000 {
+		t.Fatalf("status %s, context tokens %d", res.Status, r.a.ContextTokens)
+	}
+	if len(r.llm.Requests) != 4 {
+		t.Fatalf("requests: %d", len(r.llm.Requests))
+	}
+}
+
+func TestBackgroundProcessesDoNotDemandVerification(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses the sleep command")
+	}
+	r := newRig(t, config.ApprovalAuto,
+		llm.Calls(tc("1", "proc_start", map[string]any{"command": "sleep", "args": []string{"30"}, "wait_sec": 1})),
+		llm.Calls(tc("2", "proc_stop", map[string]any{"id": "p1"})),
+		llm.Calls(tc("3", "finish", map[string]any{"summary": "checked the server", "status": "verified", "evidence": "manual"})),
+	)
+	res := r.a.Run(context.Background(), "start and stop a server")
+	if res.Status != StatusCompleted || res.Report == nil {
+		t.Fatalf("finish should be accepted without a verify command: %+v", res)
+	}
+	if n := len(r.a.State.Tracker.Changes()); n != 0 {
+		t.Fatalf("starting/stopping a background process must not count as a change, got %d", n)
 	}
 }

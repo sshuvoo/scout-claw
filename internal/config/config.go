@@ -39,6 +39,13 @@ const (
 	MaxMaxSteps     = 500
 )
 
+// DefaultCompactAt keeps long coding sessions well inside current context
+// windows and bounds what every turn costs.
+const (
+	DefaultCompactAt = 200_000
+	MinCompactAt     = 20_000
+)
+
 type Config struct {
 	APIKey      string // never printed; see Masked
 	BaseURL     string
@@ -51,6 +58,7 @@ type Config struct {
 	TaskTimeout time.Duration
 	MaxOutput   int // bytes of tool output kept per call
 	MaxRead     int // bytes of file content fs_read may return
+	CompactAt   int // context size in tokens at which the provider compacts the conversation; 0 disables
 	LogLevel    string
 }
 
@@ -67,6 +75,7 @@ const (
 	EnvTaskTimeout = "SCOUTCLAW_TASK_TIMEOUT"
 	EnvMaxOutput   = "SCOUTCLAW_MAX_OUTPUT"
 	EnvMaxRead     = "SCOUTCLAW_MAX_READ"
+	EnvCompactAt   = "SCOUTCLAW_COMPACT_AT"
 	EnvLogLevel    = "SCOUTCLAW_LOG_LEVEL"
 )
 
@@ -82,6 +91,7 @@ func Load() (*Config, error) {
 		TaskTimeout: 30 * time.Minute,
 		MaxOutput:   16 * 1024,
 		MaxRead:     64 * 1024,
+		CompactAt:   DefaultCompactAt,
 		LogLevel:    getenv(EnvLogLevel, "warn"),
 	}
 	var err error
@@ -98,6 +108,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	if c.MaxRead, err = envInt(EnvMaxRead, c.MaxRead); err != nil {
+		return nil, err
+	}
+	if c.CompactAt, err = envInt(EnvCompactAt, c.CompactAt); err != nil {
 		return nil, err
 	}
 	if c.ToolTimeout, err = envDuration(EnvToolTimeout, c.ToolTimeout); err != nil {
@@ -122,6 +135,9 @@ func (c *Config) Validate() error {
 	}
 	if c.MaxOutput < 1024 || c.MaxOutput > 1<<20 {
 		return fmt.Errorf("max output must be between 1024 and 1048576 bytes, got %d", c.MaxOutput)
+	}
+	if c.CompactAt != 0 && c.CompactAt < MinCompactAt {
+		return fmt.Errorf("compact-at must be 0 (off) or at least %d tokens, got %d", MinCompactAt, c.CompactAt)
 	}
 	if c.MaxRead < 4096 || c.MaxRead > 1<<20 {
 		return fmt.Errorf("max read must be between 4096 and 1048576 bytes, got %d", c.MaxRead)

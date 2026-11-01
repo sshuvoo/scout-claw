@@ -300,7 +300,7 @@ func TestWithin(t *testing.T) {
 func TestEveryFileToolHasAPolicy(t *testing.T) {
 	e, _ := engine(t, config.ApprovalAsk)
 	for _, tool := range []string{"fs_list", "fs_read", "fs_stat", "fs_search", "fs_changes", "fs_write", "fs_patch", "fs_lines",
-		"fs_mkdir", "fs_copy", "fs_move", "fs_delete", "fs_undo", "fs_glob", "fs_grep", "fs_read_many", "fs_apply_patch", "project_info"} {
+		"fs_mkdir", "fs_copy", "fs_move", "fs_delete", "fs_undo", "fs_glob", "fs_grep", "fs_read_many", "fs_apply_patch", "project_info", "proc_start", "proc_output", "proc_stop", "proc_list"} {
 		if d := e.Classify(tool, json.RawMessage(`{}`)); d.Forbidden && strings.Contains(d.Reason, "has no policy") {
 			t.Errorf("%s has no policy", tool)
 		}
@@ -366,5 +366,42 @@ func TestApplyPatchAndProjectInfoClassification(t *testing.T) {
 	e, _ := engine(t, config.ApprovalReadOnly)
 	if d := e.Decide("project_info", json.RawMessage(`{}`)); d.Action != Allow {
 		t.Fatalf("project_info is read-only and must run even in readonly mode: %+v", d)
+	}
+}
+
+func TestProcToolClassification(t *testing.T) {
+	e, _ := engine(t, config.ApprovalAuto)
+	tests := []struct {
+		name    string
+		tool    string
+		in      json.RawMessage
+		risk    Risk
+		forbid  bool
+		key     string
+		outside bool
+	}{
+		{"read-only program still counts as medium", "proc_start", exec("python3", "-m", "http.server"), Medium, false, "proc_start:python3 http.server", false},
+		{"dev server keeps its own risk", "proc_start", exec("npm", "run", "dev"), Medium, false, "proc_start:npm run", false},
+		{"key skips flags", "proc_start", exec("go", "-C", "x", "run", "."), Medium, false, "proc_start:go x", false},
+		{"high-risk command stays high and has no session key", "proc_start", exec("sudo", "nginx"), High, false, "", false},
+		{"forbidden command stays forbidden", "proc_start", exec("rm", "-rf", "/"), High, true, "", false},
+		{"output is low", "proc_output", json.RawMessage(`{"id":"p1"}`), Low, false, "", false},
+		{"stop is low", "proc_stop", json.RawMessage(`{"id":"p1"}`), Low, false, "", false},
+		{"list is low", "proc_list", json.RawMessage(`{}`), Low, false, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := e.Classify(tt.tool, tt.in)
+			if d.Risk != tt.risk || d.Forbidden != tt.forbid || d.Key != tt.key || d.Outside != tt.outside {
+				t.Fatalf("got risk=%s forbidden=%v key=%q outside=%v (%s)", d.Risk, d.Forbidden, d.Key, d.Outside, d.Reason)
+			}
+		})
+	}
+	if d := e.Decide("proc_start", exec("npm", "run", "dev")); d.Action != Allow {
+		t.Fatalf("auto mode runs medium-risk proc_start: %+v", d)
+	}
+	ed, _ := engine(t, config.ApprovalEdits)
+	if d := ed.Decide("proc_start", exec("npm", "run", "dev")); d.Action != Ask {
+		t.Fatalf("edits mode must still ask before starting processes: %+v", d)
 	}
 }

@@ -20,6 +20,7 @@ import (
 	"scoutclaw/internal/session"
 	"scoutclaw/internal/tools/builtin"
 	"scoutclaw/internal/tools/filesystem"
+	"scoutclaw/internal/tools/shell"
 	"scoutclaw/internal/verify"
 )
 
@@ -44,7 +45,8 @@ type Runtime struct {
 	UI      *UI
 	Agent   *agent.Agent
 	Session *session.Session
-	Files   filesystem.FS // for /diff and /undo; shares state with the agent's tools
+	Files   filesystem.FS     // for /diff and /undo; shares state with the agent's tools
+	Procs   *shell.Background // background processes; stopped by Close
 	audit   *audit.Logger
 }
 
@@ -84,6 +86,7 @@ func newRuntime(cfg *config.Config, ui *UI, sess *session.Session) (*Runtime, er
 		ToolTimeout: cfg.ToolTimeout, StripEnv: []string{config.EnvAPIKey}, Tracker: tracker,
 		Shells: plat.Shells,
 	}
+	opts.Background = &shell.Background{Runner: builtin.Runner(opts)}
 	reg, state := builtin.New(opts)
 	exec := &executor.Executor{
 		Registry: reg, Policy: policy.New(scope, cfg.Approval), Approver: ui, Audit: lg, Redactor: red,
@@ -91,7 +94,7 @@ func newRuntime(cfg *config.Config, ui *UI, sess *session.Session) (*Runtime, er
 	}
 	ag := &agent.Agent{
 		LLM: provider, Exec: exec, Registry: reg, State: state, Audit: lg, Reporter: ui, SessionID: sess.ID,
-		Limits:   agent.Limits{MaxSteps: cfg.MaxSteps, TaskTimeout: cfg.TaskTimeout},
+		Limits:   agent.Limits{MaxSteps: cfg.MaxSteps, TaskTimeout: cfg.TaskTimeout, CompactAt: int64(cfg.CompactAt)},
 		Preamble: func(prompt string) string { return agent.TaskContext(cfg, plat, prompt) },
 	}
 	if resumed {
@@ -103,7 +106,7 @@ func newRuntime(cfg *config.Config, ui *UI, sess *session.Session) (*Runtime, er
 			ui.Notice(fmt.Sprintf("session was created with model %s; continuing with %s", sess.Model, cfg.Model))
 		}
 	}
-	return &Runtime{Cfg: cfg, UI: ui, Agent: ag, Session: sess, Files: builtin.FS(opts), audit: lg}, nil
+	return &Runtime{Cfg: cfg, UI: ui, Agent: ag, Session: sess, Files: builtin.FS(opts), Procs: opts.Background, audit: lg}, nil
 }
 
 // syncSession copies the agent's conversation pointer into the session so a
@@ -116,7 +119,13 @@ func (r *Runtime) syncSession() {
 	}
 }
 
-func (r *Runtime) Close() { _ = r.audit.Close() }
+// Close stops the session's background processes and closes the audit log.
+func (r *Runtime) Close() {
+	if n := r.Procs.Shutdown(); n > 0 {
+		r.UI.Notice(fmt.Sprintf("stopped %d background process(es)", n))
+	}
+	_ = r.audit.Close()
+}
 
 // RunTask runs one task. Ctrl-C (SIGINT/SIGTERM) cancels it and terminates any
 // child processes; a second Ctrl-C exits immediately.

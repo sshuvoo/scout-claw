@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -43,6 +44,7 @@ var slashCommands = []struct{ name, desc string }{
 	{"/approval", "show or switch approvals (ask|edits|auto|readonly)"},
 	{"/diff", "file changes made in this session"},
 	{"/undo", "undo the last file change (/undo 3 for more)"},
+	{"/procs", "background processes (/procs stop <id>)"},
 	{"/key", "enter or replace your API key"},
 	{"/config", "show effective configuration"},
 	{"/status", "session, limits and workspace"},
@@ -61,6 +63,7 @@ const helpText = `Type a task in plain language, or a slash command:
   /approval [mode]      show or switch approvals: ask | edits | auto | readonly (this session only)
   /diff [path]          file changes ScoutClaw made in this session, with diffs
   /undo [n]             undo the last n file changes (default 1)
+  /procs [stop <id>]    list background processes started by ScoutClaw, or stop one
   /key                  enter or replace your OpenAI API key (masked input)
   /history              recent sessions
   /doctor               quick local checks
@@ -168,8 +171,8 @@ func (a *App) slash(ctx context.Context, cfg *config.Config, ui *UI, rt *Runtime
 	case "/config":
 		a.printConfig(cfg, out)
 	case "/status":
-		say("session   %s (%d tasks)\nmodel     %s\napproval  %s\nworkspace %s\nlimits    %d steps/task, %s per tool, %s per task",
-			rt.Session.ID, len(rt.Session.Tasks), cfg.Model, cfg.Approval, cfg.Workspace, cfg.MaxSteps, cfg.ToolTimeout, cfg.TaskTimeout)
+		say("session   %s (%d tasks)\nmodel     %s\napproval  %s\nworkspace %s\nlimits    %d steps/task, %s per tool, %s per task\ncontext   %s",
+			rt.Session.ID, len(rt.Session.Tasks), cfg.Model, cfg.Approval, cfg.Workspace, cfg.MaxSteps, cfg.ToolTimeout, cfg.TaskTimeout, contextLine(cfg, rt))
 	case "/model":
 		if len(args) == 0 {
 			say("model: %s   (switch with /model <name>)", cfg.Model)
@@ -227,6 +230,20 @@ func (a *App) slash(ctx context.Context, cfg *config.Config, ui *UI, rt *Runtime
 		if err != nil {
 			say("%s", ui.c(cRed, err.Error()))
 		}
+	case "/procs":
+		if len(args) == 2 && strings.ToLower(args[0]) == "stop" {
+			in, _ := json.Marshal(map[string]string{"id": args[1]})
+			if t, ok := rt.Agent.Registry.Get("proc_stop"); ok {
+				res, err := t.Execute(ctx, in)
+				if err != nil {
+					say("%s", ui.c(cRed, err.Error()))
+					break
+				}
+				say("%s", strings.TrimRight(ui.Redactor.Redact(res.Output), "\n"))
+			}
+			break
+		}
+		say("%s", strings.TrimRight(rt.Procs.List(), "\n"))
 	case "/key":
 		if err := a.promptForKey(ctx, cfg, ui, false); err != nil {
 			say("%s", ui.c(cRed, err.Error()))
@@ -262,6 +279,14 @@ func (a *App) slash(ctx context.Context, cfg *config.Config, ui *UI, rt *Runtime
 		say("%s", ui.c(cYellow, "unknown command "+name+" — type /help"))
 	}
 	return false, nil
+}
+
+func contextLine(cfg *config.Config, rt *Runtime) string {
+	compact := "compaction off"
+	if cfg.CompactAt > 0 {
+		compact = fmt.Sprintf("compacts at %d tokens", cfg.CompactAt)
+	}
+	return fmt.Sprintf("%d tokens in the conversation (%s)", rt.Agent.ContextTokens, compact)
 }
 
 // promptForKey reads the API key with "*" feedback, stores it in

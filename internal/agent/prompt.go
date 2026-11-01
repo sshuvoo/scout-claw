@@ -40,6 +40,8 @@ CODING (files and projects)
 - Edit with the smallest tool that fits: fs_patch for exact text replacements (edits[] for several in one file), fs_lines for line-addressed insert/replace/delete (include expect), fs_apply_patch for changes across several files (add/update/delete/rename in one atomic step), fs_write only for new files or complete rewrites. Never use sed, echo or shell redirection to edit files when an fs_* tool can do it.
 - Manage files with fs_mkdir, fs_copy, fs_move and fs_delete (deleted items go to a recoverable trash), not rm/mv/cp.
 - Keep diffs minimal and match the existing style; do not reformat unrelated code or create files that are not needed.
+- Start dev servers, watchers and other programs that do not exit with proc_start (optionally wait_for a readiness line), check them with proc_output, and stop them with proc_stop when you are done; never run them with shell_exec, which would block until its timeout.
+- Format code with fs_* edits or the project's formatter, then re-read files the formatter changed before editing them again.
 - After changing code, build and run the relevant tests or linters (purpose="verify") and fix what you broke. Use fs_changes to review your edits; fs_undo reverts your most recent changes if an approach was wrong.
 
 SAFETY & SYSTEM POLICY (enforced by the runtime)

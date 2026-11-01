@@ -331,6 +331,7 @@ func (a *App) printConfig(cfg *config.Config, out io.Writer) {
 	row("task timeout", cfg.TaskTimeout.String(), config.EnvTaskTimeout)
 	row("max output", fmt.Sprintf("%d bytes", cfg.MaxOutput), config.EnvMaxOutput)
 	row("max read", fmt.Sprintf("%d bytes", cfg.MaxRead), config.EnvMaxRead)
+	row("compact at", compactLabel(cfg.CompactAt), config.EnvCompactAt)
 }
 
 const repo = "sshuvoo/scout-claw"
@@ -396,4 +397,11 @@ checksum, and replaces the running scout executable in place.
 	cmd.Flags().BoolVar(&check, "check", false, "only check whether an update is available")
 	cmd.Flags().StringVar(&version, "version", "", "install this specific release tag")
 	return cmd
+}
+
+func compactLabel(n int) string {
+	if n == 0 {
+		return "off"
+	}
+	return fmt.Sprintf("%d tokens", n)
 }

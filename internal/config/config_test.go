@@ -10,7 +10,7 @@ import (
 )
 
 func clearEnv(t *testing.T) {
-	for _, k := range []string{EnvAPIKey, EnvBaseURL, EnvModel, EnvWorkspace, EnvStateDir, EnvApproval, EnvMaxSteps, EnvToolTimeout, EnvTaskTimeout, EnvMaxOutput, EnvMaxRead, EnvLogLevel} {
+	for _, k := range []string{EnvAPIKey, EnvBaseURL, EnvModel, EnvWorkspace, EnvStateDir, EnvApproval, EnvMaxSteps, EnvToolTimeout, EnvTaskTimeout, EnvMaxOutput, EnvMaxRead, EnvCompactAt, EnvLogLevel} {
 		t.Setenv(k, "")
 	}
 	t.Setenv(EnvStateDir, t.TempDir())
@@ -47,6 +47,18 @@ func TestOverridesAndValidation(t *testing.T) {
 	t.Setenv(EnvMaxRead, "131072")
 	if c, err := Load(); err != nil || c.Approval != ApprovalEdits || c.MaxRead != 128*1024 {
 		t.Fatalf("edits mode / max read: %v %+v", err, c)
+	}
+	for _, tt := range []struct {
+		v    string
+		want int
+		ok   bool
+	}{{"", DefaultCompactAt, true}, {"0", 0, true}, {"50000", 50000, true}, {"19999", 0, false}, {"lots", 0, false}} {
+		clearEnv(t)
+		t.Setenv(EnvCompactAt, tt.v)
+		c, err := Load()
+		if (err == nil) != tt.ok || (tt.ok && c.CompactAt != tt.want) {
+			t.Errorf("%s=%q: err=%v cfg=%+v", EnvCompactAt, tt.v, err, c)
+		}
 	}
 	for k, v := range map[string]string{EnvApproval: "yolo", EnvMaxSteps: "abc", EnvMaxRead: "100"} {
 		clearEnv(t)
