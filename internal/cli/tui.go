@@ -134,6 +134,12 @@ func (a *App) runTUI(cmd *cobra.Command, cfg *config.Config, sess *session.Sessi
 
 	m := newTUIModel(a, cmd.Context(), cfg, ui)
 	m.firstKey = cfg.APIKey == ""
+	// Mouse capture is needed for wheel-scroll: without it, terminals
+	// emulate wheel scroll as Up/Down key presses (so plain pagers still
+	// work), which is indistinguishable from real arrow keys and collides
+	// with prompt history. To select/copy text, hold Shift while dragging
+	// (supported by iTerm2, Alacritty, kitty, Windows Terminal, GNOME
+	// Terminal, Konsole, VS Code's terminal, etc.) to bypass mouse capture.
 	prog := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(cmd.Context()))
 	w.p = prog
 
@@ -371,9 +377,7 @@ func (m *tuiModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if m.approval != nil { // approval panel owns the keyboard
 		switch strings.ToLower(k) {
-		case "y", "enter":
-			m.answer(executor.ApprovalResponse{Approved: true}, "approved")
-		case "a":
+		case "y", "enter", "a":
 			d := m.approval.req.Decision
 			m.answer(executor.ApprovalResponse{Approved: true, Remember: d.Risk == policy.Medium && d.Key != ""}, "approved")
 		case "p":
@@ -736,7 +740,7 @@ func (m *tuiModel) inputBox() string {
 		}
 		opts := "[y] approve   [n] decline"
 		if d.Risk == policy.Medium && d.Key != "" {
-			opts += "   [a] always this session"
+			opts += " (remembered for this kind of change, for the rest of the session)"
 		}
 		if r := m.approval.req.SuggestedRule; r != "" {
 			opts += "   [p] always in project (" + r + ")"

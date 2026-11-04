@@ -30,7 +30,51 @@ const (
 	cYellow = "\033[33m"
 	cRed    = "\033[31m"
 	cGray   = "\033[90m"
+	bgRed   = "\033[41m"
+	bgGreen = "\033[42m"
 )
+
+// diffTools are tools whose output/preview is a unified diff, worth
+// colorizing line-by-line instead of as one flat block.
+var diffTools = map[string]bool{
+	"fs_write": true, "fs_patch": true, "fs_lines": true, "fs_apply_patch": true, "fs_undo": true,
+}
+
+// colorDiff colors unified-diff "-" lines with a red background and "+"
+// lines with a green background, line by line. Other lines (headers,
+// context, hunk markers) are left untouched.
+func (u *UI) colorDiff(s string) string {
+	if !u.Color {
+		return s
+	}
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		switch {
+		case strings.HasPrefix(l, "+++") || strings.HasPrefix(l, "---"):
+		case strings.HasPrefix(l, "+"):
+			lines[i] = bgGreen + l + cReset
+		case strings.HasPrefix(l, "-"):
+			lines[i] = bgRed + l + cReset
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// diffBody strips a tool preview down to its unified-diff body: the
+// label/filename lines ("edit path", "--- path", "+++ path", "@@ ... @@")
+// are dropped, leaving only the context/added/removed lines, which is the
+// part worth showing in a compact approval preview.
+func diffBody(preview string) string {
+	var out []string
+	for _, l := range strings.Split(preview, "\n") {
+		switch {
+		case strings.HasPrefix(l, "--- "), strings.HasPrefix(l, "+++ "), strings.HasPrefix(l, "@@ "):
+		case l != "" && (l[0] == ' ' || l[0] == '-' || l[0] == '+'):
+			out = append(out, l)
+		}
+	}
+	return strings.Join(out, "\n")
+}
 
 // UI writes progress and prompts. It implements agent.Reporter and executor.Approver.
 type UI struct {
@@ -119,15 +163,43 @@ func (u *UI) ToolStart(summary string) {
 	if u.onStatus != nil {
 		u.onStatus(u.Redactor.Redact(summary))
 	}
+	if path, ok := strings.CutPrefix(summary, "fs_read "); ok {
+		fmt.Fprintln(u.Out, u.c(cBold, "Read: "+u.Redactor.Redact(path)))
+		return
+	}
+	if path, ok := strings.CutPrefix(summary, "fs_patch "); ok {
+		fmt.Fprintln(u.Out, u.c(cBold, "Patch: "+u.Redactor.Redact(path)))
+		return
+	}
+	if rest, ok := strings.CutPrefix(summary, "fs_read_many "); ok {
+		u.readManyCard(rest)
+		return
+	}
 	fmt.Fprintln(u.Out, u.c(cBold, "$ "+u.Redactor.Redact(summary)))
+}
+
+// readManyCard renders the files an fs_read_many call is about to read as a
+// bordered vertical list instead of one long inline summary line.
+func (u *UI) readManyCard(pathsStr string) {
+	paths := strings.Fields(pathsStr)
+	fmt.Fprintln(u.Out, u.c(cBold, fmt.Sprintf("┌─ Read %d files", len(paths))))
+	for _, p := range paths {
+		fmt.Fprintf(u.Out, "%s %s\n", u.c(cBold, "│"), u.Redactor.Redact(p))
+	}
+	fmt.Fprintln(u.Out, u.c(cBold, "└─"))
 }
 
 func (u *UI) ToolEnd(o executor.Outcome) {
 	if u.onStatus != nil {
 		u.onStatus("")
 	}
-	if o.Call.Name == "update_plan" || o.Call.Name == "finish" && o.OK() {
+	switch o.Call.Name {
+	case "update_plan":
 		return
+	case "finish", "fs_read", "fs_read_many":
+		if o.OK() {
+			return
+		}
 	}
 	r := o.Result
 	var badge string
@@ -163,7 +235,11 @@ func (u *UI) ToolEnd(o executor.Outcome) {
 	if len(prev) > 1200 && !u.Verbose {
 		prev = prev[:1200] + "…"
 	}
-	fmt.Fprintln(u.Out, u.c(cGray, indent(prev, "    ")))
+	if diffTools[o.Call.Name] {
+		fmt.Fprintln(u.Out, indent(u.colorDiff(prev), "    "))
+	} else {
+		fmt.Fprintln(u.Out, u.c(cGray, indent(prev, "    ")))
+	}
 }
 
 func (u *UI) Notice(msg string) { fmt.Fprintln(u.Err, u.c(cYellow, "! "+msg)) }
@@ -177,16 +253,14 @@ func (u *UI) describeApproval(req executor.ApprovalRequest) {
 	}
 	fmt.Fprintln(u.Out)
 	fmt.Fprintln(u.Out, u.c(colour+cBold, fmt.Sprintf("⚠  Approval needed — %s risk", strings.ToUpper(d.Risk.String()))))
-	fmt.Fprintf(u.Out, "   action  : %s\n   why     : %s\n", u.Redactor.Redact(req.Summary), d.Reason)
-	if d.Effects != "" {
-		fmt.Fprintf(u.Out, "   effects : %s\n", d.Effects)
-	}
-	if d.Recovery != "" {
-		fmt.Fprintf(u.Out, "   recovery: %s\n", d.Recovery)
-	}
 	if req.Preview != "" {
-		fmt.Fprintln(u.Out, "   change  :")
-		fmt.Fprintln(u.Out, indent(clipLines(u.Redactor.Redact(req.Preview), 60), "     "))
+		preview := clipLines(u.Redactor.Redact(diffBody(req.Preview)), 60)
+		if diffTools[req.Tool] {
+			preview = u.colorDiff(preview)
+		}
+		fmt.Fprintln(u.Out, indent(preview, "   "))
+	} else {
+		fmt.Fprintln(u.Out, "   "+u.Redactor.Redact(req.Summary))
 	}
 }
 
@@ -201,9 +275,10 @@ func (u *UI) Approve(ctx context.Context, req executor.ApprovalRequest) (executo
 		return executor.ApprovalResponse{}, nil
 	}
 	d := req.Decision
+	remember := d.Risk == policy.Medium && d.Key != ""
 	opts := "[y]es / [n]o"
-	if d.Risk == policy.Medium && d.Key != "" {
-		opts += " / [a]lways for this session"
+	if remember {
+		opts += " (remembered for this kind of change, for the rest of the session)"
 	}
 	if req.SuggestedRule != "" {
 		opts += " / [p] always in this project"
@@ -215,13 +290,8 @@ func (u *UI) Approve(ctx context.Context, req executor.ApprovalRequest) (executo
 		return executor.ApprovalResponse{}, err
 	}
 	switch strings.ToLower(strings.TrimSpace(line)) {
-	case "y", "yes":
-		return executor.ApprovalResponse{Approved: true}, nil
-	case "a", "always":
-		if d.Risk == policy.Medium && d.Key != "" {
-			return executor.ApprovalResponse{Approved: true, Remember: true}, nil
-		}
-		return executor.ApprovalResponse{Approved: true}, nil
+	case "y", "yes", "a", "always":
+		return executor.ApprovalResponse{Approved: true, Remember: remember}, nil
 	case "p", "project":
 		if req.SuggestedRule != "" {
 			return executor.ApprovalResponse{Approved: true, Persist: true}, nil

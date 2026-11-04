@@ -6,6 +6,7 @@ package policy
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -92,6 +93,12 @@ func (e *Engine) Decide(tool string, input json.RawMessage) Decision {
 	case d.Risk == Medium && e.Mode == config.ApprovalAuto:
 		d.Action = Allow
 	case d.Risk == Medium && e.Mode == config.ApprovalEdits && fileEditTools[tool] && !d.Outside && !d.Deletes:
+		d.Action = Allow
+	case tool == "fs_patch" && d.Risk == Medium && !d.Outside && !d.Deletes:
+		// fs_patch only ever touches text it already read (old_string ->
+		// new_string); it keeps a backup and, inside a git repo, is also
+		// trivially diffable/revertable, so it never needs a popup on its
+		// own — only "outside workspace" and "readonly mode" still gate it.
 		d.Action = Allow
 	default:
 		d.Action = Ask
@@ -260,9 +267,28 @@ func (e *Engine) classifyWritePath(tool, abs string) Decision {
 		return Decision{Risk: High, Outside: true, Reason: fmt.Sprintf("modifies %s, outside the workspace %s", abs, e.Scope.Root),
 			Effects:  "changes a file outside the project",
 			Recovery: "ScoutClaw keeps a backup of the previous contents and prints its location"}
+	case tool != "fs_mkdir" && inGitRepo(abs):
+		return Decision{Risk: Low, Reason: "edits a file inside a git repository; use git diff/checkout to review or revert"}
 	}
 	return Decision{Risk: Medium, Reason: "modifies a file inside the workspace", Effects: "edits " + abs,
 		Recovery: "a backup of the previous contents is kept", Key: tool + ":workspace"}
+}
+
+// inGitRepo reports whether abs sits inside a git working tree, walking up
+// from its directory to look for a ".git" entry (directory for a normal
+// repo, file for a worktree or submodule).
+func inGitRepo(abs string) bool {
+	dir := filepath.Dir(abs)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
+			return true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false
+		}
+		dir = parent
+	}
 }
 
 func higher(a, b Decision) Decision {
