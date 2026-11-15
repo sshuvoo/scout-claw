@@ -43,7 +43,7 @@ func FS(o Options) filesystem.FS {
 // Runner returns the shell runner for o; background processes use the same settings.
 func Runner(o Options) shell.Runner {
 	return shell.Runner{Scope: o.Scope, MaxOutput: o.MaxOutput, DefaultTimeout: o.ToolTimeout, StripEnv: o.StripEnv,
-		Bash: o.Shells.Bash, PowerShell: o.Shells.PowerShell}
+		PowerShell: o.Shells.PowerShell}
 }
 
 // New returns the registry and the per-task state shared with the task tools.

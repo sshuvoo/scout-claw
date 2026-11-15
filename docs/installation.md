@@ -56,7 +56,7 @@ Windows, from PowerShell (from CMD, wrap it: `powershell -NoProfile -ExecutionPo
 irm https://raw.githubusercontent.com/sshuvoo/scout-claw/main/install.ps1 | iex
 ```
 
-`install.ps1` installs `%USERPROFILE%\.local\bin\scout.exe` and adds that folder to your user PATH (set `SCOUT_NO_MODIFY_PATH=1` to skip). It honours the same `SCOUT_VERSION` and `SCOUT_INSTALL_DIR` variables as `install.sh`. Install [Git for Windows](https://git-scm.com/downloads/win) as well so the agent can run bash scripts.
+`install.ps1` installs `%USERPROFILE%\.local\bin\scout.exe` and adds that folder to your user PATH (set `SCOUT_NO_MODIFY_PATH=1` to skip). It honours the same `SCOUT_VERSION` and `SCOUT_INSTALL_DIR` variables as `install.sh`. ScoutClaw's cross-platform shell and common Unix commands are bundled; no Git for Windows installation is needed.
 
 The script downloads the archive for your OS and architecture, verifies its SHA-256 checksum against `checksums.txt`, and installs `scout` to `~/.local/bin`. Options (environment variables):
 

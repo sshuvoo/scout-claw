@@ -1,6 +1,6 @@
 // Package shell provides bounded process execution. shell_exec runs one
-// executable with explicit arguments (no shell involved). shell_script runs a
-// bash script (system bash on Linux/macOS, Git Bash on Windows) and
+// executable with explicit arguments (no shell involved). shell_script runs an
+// embedded Bash-compatible interpreter and portable core utilities, while
 // shell_powershell runs a PowerShell script (Windows only); both are always
 // treated as high risk by the policy.
 package shell
@@ -15,8 +15,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
+	"mvdan.cc/sh/v3/expand"
+	"mvdan.cc/sh/v3/interp"
+	"mvdan.cc/sh/v3/syntax"
+	"mvdan.cc/sh/x/coreutils"
 	"scoutclaw/internal/policy"
 	"scoutclaw/internal/tools"
 )
@@ -26,10 +31,7 @@ type Runner struct {
 	MaxOutput      int
 	DefaultTimeout time.Duration // also the upper bound for per-call timeouts
 	// StripEnv lists variables removed from the child environment (e.g. the model API key).
-	StripEnv []string
-	// Bash and PowerShell are interpreter paths (see platform.DetectShells);
-	// the matching script tool is only offered when its path is set.
-	Bash       string
+	StripEnv   []string
 	PowerShell string
 }
 
@@ -94,18 +96,16 @@ func (r Runner) Tools() []tools.Tool {
 			},
 		},
 	}
-	if r.Bash != "" {
-		ts = append(ts, &tools.Typed[scriptArgs]{
-			ToolName: "shell_script",
-			Desc: "Run a multi-line bash script (" + r.Bash + " -c). Only use when shell syntax (pipes, redirects, loops) is genuinely required; " +
-				"it is always high risk and requires explicit user approval. Prefer shell_exec.",
-			Schema:     scriptSchema,
-			ValidateFn: validateScript,
-			Run: func(ctx context.Context, a scriptArgs) (tools.Result, error) {
-				return r.run(ctx, r.Bash, []string{"-c", a.Script}, a.Workdir, a.TimeoutSec, a.Purpose)
-			},
-		})
-	}
+	ts = append(ts, &tools.Typed[scriptArgs]{
+		ToolName: "shell_script",
+		Desc: "Run a multi-line POSIX/Bash-compatible script using ScoutClaw's embedded cross-platform shell. Common commands such as ls, touch, cat, cp, mv, mkdir and rm are available on every OS. " +
+			"Scripts are always high risk and require explicit user approval. Prefer shell_exec for a single program.",
+		Schema:     scriptSchema,
+		ValidateFn: validateScript,
+		Run: func(ctx context.Context, a scriptArgs) (tools.Result, error) {
+			return r.runScript(ctx, a.Script, a.Workdir, a.TimeoutSec, a.Purpose)
+		},
+	})
 	if r.PowerShell != "" {
 		ts = append(ts, &tools.Typed[scriptArgs]{
 			ToolName: "shell_powershell",
@@ -120,6 +120,154 @@ func (r Runner) Tools() []tools.Tool {
 		})
 	}
 	return ts
+}
+
+// runScript executes a script in the embedded shell. The interpreter and
+// portable core utilities are bundled into ScoutClaw, so this tool is
+// available even when no system shell is installed.
+func (r Runner) runScript(ctx context.Context, script, workdir string, timeoutSec int, purpose string) (tools.Result, error) {
+	dir := r.Scope.Root
+	if workdir != "" {
+		dir = r.Scope.Resolve(workdir, "")
+	}
+	if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+		return tools.Result{}, tools.Errorf(tools.KindInvalidInput, "workdir %q is not a directory", dir)
+	}
+	timeout := r.DefaultTimeout
+	if timeoutSec > 0 && time.Duration(timeoutSec)*time.Second < timeout {
+		timeout = time.Duration(timeoutSec) * time.Second
+	}
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	buf := newHeadTail(r.MaxOutput)
+	w := &lockedWriter{w: buf}
+	file, err := syntax.NewParser(syntax.Variant(syntax.LangBash)).Parse(strings.NewReader(script), "")
+	if err != nil {
+		return tools.Result{}, tools.Errorf(tools.KindInvalidInput, "invalid shell script: %v", err)
+	}
+	sh, err := interp.New(
+		interp.Dir(dir),
+		interp.Env(expand.ListEnviron(r.childEnv()...)),
+		interp.StdIO(nil, w, w),
+		interp.ExecHandlers(coreutils.ExecHandler, r.execHandler),
+	)
+	if err != nil {
+		return tools.Result{}, tools.Errorf(tools.KindInvalidInput, "could not initialize embedded shell: %v", err)
+	}
+	start := time.Now()
+	runErr := sh.Run(cctx, file)
+	dur := time.Since(start)
+	res := tools.Result{
+		Output: buf.String(), Truncated: buf.Truncated(),
+		Metadata: map[string]string{"duration": dur.Round(time.Millisecond).String(), "workdir": dir, "purpose": purpose},
+		Mutated:  purpose == "change",
+	}
+	switch {
+	case runErr == nil:
+		return res, nil
+	case errors.Is(cctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil:
+		res.Kind, res.ExitCode = tools.KindTimeout, -1
+		res.Output += fmt.Sprintf("\n[timed out after %s; process tree killed]", timeout)
+		return res, nil
+	case ctx.Err() != nil:
+		res.Kind, res.ExitCode = tools.KindCancelled, -1
+		res.Output += "\n[cancelled; process tree killed]"
+		return res, nil
+	default:
+		var status interp.ExitStatus
+		if errors.As(runErr, &status) {
+			res.Kind, res.ExitCode = tools.KindFailed, int(status)
+			return res, nil
+		}
+		return res, tools.Errorf(tools.KindFailed, "embedded shell failed: %v", runErr)
+	}
+}
+
+// execHandler runs non-coreutils programs with the same process-tree
+// cancellation behavior as shell_exec.
+func (r Runner) execHandler(_ interp.ExecHandlerFunc) interp.ExecHandlerFunc {
+	return func(ctx context.Context, args []string) error {
+		hc := interp.HandlerCtx(ctx)
+		if len(args) == 0 {
+			return nil
+		}
+		path, err := interp.LookPathDir(hc.Dir, hc.Env, args[0])
+		if err != nil {
+			fmt.Fprintln(hc.Stderr, err)
+			return interp.ExitStatus(127)
+		}
+		if err := checkBatchArgs(path, args[1:]); err != nil {
+			fmt.Fprintln(hc.Stderr, err)
+			return interp.ExitStatus(126)
+		}
+		cmd := exec.CommandContext(ctx, path)
+		cmd.Args = args
+		cmd.Dir = hc.Dir
+		cmd.Env = shellEnv(hc.Env)
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = hc.Stdin, hc.Stdout, hc.Stderr
+		tree := configureProcess(cmd)
+		defer tree.release()
+		if err := cmd.Start(); err != nil {
+			fmt.Fprintln(hc.Stderr, err)
+			return interp.ExitStatus(127)
+		}
+		tree.attach(cmd)
+		if err := cmd.Wait(); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			var ee *exec.ExitError
+			if errors.As(err, &ee) {
+				code := ee.ExitCode()
+				if code < 0 {
+					code = 128
+				}
+				return interp.ExitStatus(uint8(code))
+			}
+			fmt.Fprintln(hc.Stderr, err)
+			return interp.ExitStatus(127)
+		}
+		return nil
+	}
+}
+
+func shellEnv(env expand.Environ) []string {
+	var out []string
+	indexes := make(map[string]int)
+	normalize := func(name string) string {
+		if runtime.GOOS == "windows" {
+			return strings.ToUpper(name)
+		}
+		return name
+	}
+	env.Each(func(name string, v expand.Variable) bool {
+		if v.Exported && v.Set {
+			pair := name + "=" + v.Str
+			key := normalize(name)
+			if i, ok := indexes[key]; ok {
+				out[i] = pair
+			} else {
+				indexes[key] = len(out)
+				out = append(out, pair)
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// Interpreter output can be written from more than one process when scripts
+// use background commands. Protect the bounded writer from concurrent writes.
+type lockedWriter struct {
+	mu sync.Mutex
+	w  *headTail
+}
+
+func (w *lockedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.w.Write(p)
 }
 
 func validateScript(a *scriptArgs) error {
