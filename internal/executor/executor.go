@@ -344,7 +344,7 @@ func Summarize(c Call) string {
 		if len(s) > 200 {
 			s = s[:200] + "…"
 		}
-		return map[string]string{"shell_script": "bash -c ", "shell_powershell": "pwsh -c "}[c.Name] + fmt.Sprintf("%q", s)
+		return map[string]string{"shell_script": "embedded shell script ", "shell_powershell": "pwsh -c "}[c.Name] + fmt.Sprintf("%q", s)
 	case "fs_write", "fs_patch", "fs_lines", "fs_read", "fs_stat", "fs_list", "fs_mkdir", "fs_changes":
 		return strings.TrimSpace(c.Name + " " + str("path"))
 	case "fs_copy", "fs_move":

@@ -17,14 +17,14 @@ const SystemPrompt = `You are ScoutClaw, the general-purpose system administrato
 
 ROLE & CAPABILITIES
 - You act as an expert, autonomous system administrator. You configure systems, manage processes and services, install and update packages, automate workflows, manipulate files, manage storage and networking, inspect health and resources, deploy software, troubleshoot issues, and execute any commands needed to achieve the user's objective.
-- You can do anything supported by the shell and standard command-line tools. You use shell execution (shell_exec, plus shell_script and shell_powershell where the environment lists them) and built-in tools (fs_*, sys_info, process_list, net_*, dev_runtimes) decisively to get things done.
+- You can do anything supported by shell_exec, the embedded cross-platform shell_script, Windows shell_powershell where available, and built-in tools (fs_*, sys_info, process_list, net_*, dev_runtimes). Use them decisively to get things done.
 
 HOW YOU WORK
 1. Understand the goal: Determine what the user wants to accomplish. If a reasonable assumption can be made to proceed, make it and proceed; ask questions only when blocked by missing requirements.
 2. Plan and organize: For multi-step tasks, maintain clarity with update_plan.
 3. Choose the right tool:
    - Use shell_exec to run executables directly with argument arrays.
-   - Use shell_script (bash) or shell_powershell (Windows) when shell features are needed (pipes, redirects, loops, chains). Write for the OS and shells listed in the environment, not for Linux by default.
+   - Use shell_script when shell features are needed (pipes, redirects, loops, chains). It uses an embedded POSIX/Bash-compatible interpreter and portable core utilities on every OS. Some full-Bash features are not implemented; use shell_exec for native programs. Use shell_powershell (Windows) for Windows administration.
    - Use the fs_* tools for all file reading and editing (see CODING) and sys_info, process_list, net_*, dev_runtimes for diagnostics.
 4. Mark every shell command with its purpose:
    - "inspect": gather information, check state, inspect files/logs/system.
@@ -132,15 +132,7 @@ func projectInstructions(cfg *config.Config) string {
 // from Linux, so it does not reach for systemctl or GNU flags everywhere.
 func shellFacts(p platform.Info) string {
 	var b strings.Builder
-	if p.Shells.Bash != "" {
-		fmt.Fprintf(&b, "- shell_script: bash (%s)\n", p.Shells.Bash)
-	} else {
-		b.WriteString("- shell_script: unavailable (no bash found")
-		if p.OS == "windows" {
-			b.WriteString("; install Git for Windows or set " + platform.EnvBash)
-		}
-		b.WriteString(")\n")
-	}
+	b.WriteString("- shell_script: embedded POSIX/Bash-compatible interpreter and portable core utilities (available on all OSes; no shell install required)\n")
 	if p.Shells.PowerShell != "" {
 		fmt.Fprintf(&b, "- shell_powershell: %s\n", p.Shells.PowerShell)
 	}
@@ -150,9 +142,6 @@ func shellFacts(p platform.Info) string {
 	case "windows":
 		b.WriteString("- Windows: prefer shell_powershell for system administration (Get-Service, Get-Process, Get-CimInstance, Get-WinEvent, winget). " +
 			"systemctl, journalctl, apt, sudo and /proc do not exist. Paths use backslashes (C:\\Users\\...).")
-		if p.Shells.Bash != "" {
-			b.WriteString(" In shell_script (Git Bash) Unix tools work and drives appear as /c/Users/...")
-		}
 		b.WriteString("\n")
 	}
 	return b.String()

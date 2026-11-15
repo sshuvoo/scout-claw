@@ -69,7 +69,7 @@ Where the scripts install:
 
 Both scripts download the archive for your OS and CPU (amd64 or arm64) from the latest GitHub release and refuse to install if its SHA-256 does not match `checksums.txt`. Prefer to read a script before running it? Download it, inspect it, then run `sh install.sh` or `powershell -File install.ps1`.
 
-On Windows, also install [Git for Windows](https://git-scm.com/downloads/win) so the agent can run bash scripts (`shell_script`) in addition to PowerShell (`shell_powershell`); `scout doctor` shows which shells were found.
+The agent's cross-platform `shell_script` uses an embedded shell and portable core utilities, so no separate Bash or Git for Windows installation is required. Windows PowerShell remains available for Windows administration.
 
 Open a new terminal, check with `scout version`, then run `scout setup` to store your API key (saved to `~/.scoutclaw.env`, mode 600, works from any directory). A project-local `./.env` only applies when you run `scout` from that directory. Later, `scout update` upgrades in place on every OS.
 
@@ -164,7 +164,7 @@ Tools exposed to the model (all go through the same pipeline):
 - **Project discovery:** `project_info` reads manifests (go.mod, package.json, pyproject.toml, Cargo.toml, Maven/Gradle, .NET, Ruby, PHP) and reports the build/test/lint/format commands, package manager, Makefile targets, CI workflows, instruction files (AGENTS.md, CONTRIBUTING.md, …), git branch and nested projects. It never runs anything.
 - **Background processes:** `proc_start` runs dev servers, watchers and databases in the background (one executable, no shell; optionally waits for a readiness line such as `listening on`), `proc_output` returns what they printed since the last check, `proc_stop` stops a process and everything it spawned, `proc_list` lists them. All of them stop when ScoutClaw exits; in chat, `/procs` lists them and `/procs stop <id>` stops one.
 - **Change journal:** `fs_changes` lists this session's file changes with a combined diff per file; `fs_undo` reverts the latest ones (and refuses if a file was changed again afterwards). In chat: `/diff` and `/undo [n]`.
-- **Shell:** `shell_exec` (one executable + argument array, **no shell**), `shell_script` (bash: the system bash on Linux/macOS, Git Bash on Windows; always high risk), `shell_powershell` (Windows only: PowerShell 7, falling back to Windows PowerShell 5.1; always high risk). Override discovery with `SCOUT_BASH_PATH` / `SCOUT_POWERSHELL_PATH`; `scout doctor` shows what was found.
+- **Shell:** `shell_exec` (one executable + argument array, **no shell**), `shell_script` (embedded POSIX/Bash-compatible interpreter with portable core utilities such as `ls`, `touch`, `cat`, `cp`, `mv`, `mkdir`, and `rm`; available on every OS and always high risk), `shell_powershell` (Windows only: PowerShell 7, falling back to Windows PowerShell 5.1; always high risk). `SCOUT_POWERSHELL_PATH` overrides PowerShell discovery; `scout doctor` reports its availability.
 - **System (Linux):** `sys_info` (OS, kernel, load, memory, swap, disk and inode usage), `process_list` (CPU/memory top, secrets in command lines masked), `env_list` (secret values masked), `dev_runtimes`. Service state and logs use `shell_exec` with `systemctl status` / `journalctl`.
 - **Network:** `net_dns`, `net_connect` (TCP), `net_http` (GET/HEAD, no credentials, bounded).
 - **Bookkeeping:** `update_plan`, `finish`.

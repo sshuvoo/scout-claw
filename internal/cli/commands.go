@@ -230,7 +230,7 @@ With --online it also sends one tiny request to the model to prove the key and m
 			}
 			check(err == nil, true, "state directory", orStr(errString(err), cfg.StateDir+" (writable)"))
 
-			check(p.Shells.Bash != "", false, "shell_script (bash)", orStr(p.Shells.Bash, "not found; set "+platform.EnvBash+map[bool]string{true: " or install Git for Windows", false: ""}[p.OS == "windows"]))
+			check(true, false, "shell_script", "embedded POSIX/Bash-compatible interpreter and portable core utilities")
 			if p.OS == "windows" {
 				check(p.Shells.PowerShell != "", false, "shell_powershell", orStr(p.Shells.PowerShell, "not found; set "+platform.EnvPowerShell))
 			}

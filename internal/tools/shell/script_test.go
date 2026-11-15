@@ -2,9 +2,7 @@ package shell
 
 import (
 	"context"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -21,32 +19,27 @@ func toolNames(r Runner) []string {
 	return names
 }
 
-func TestScriptToolsFollowDetectedShells(t *testing.T) {
+func TestEmbeddedShellIsAlwaysAvailable(t *testing.T) {
 	r := Runner{Scope: policy.NewScope(t.TempDir()), MaxOutput: 2048, DefaultTimeout: 5 * time.Second}
-	if got := strings.Join(toolNames(r), ","); got != "shell_exec" {
-		t.Fatalf("no shells: got %s", got)
+	if got := strings.Join(toolNames(r), ","); got != "shell_exec,shell_script" {
+		t.Fatalf("embedded shell missing: got %s", got)
 	}
-	r.Bash, r.PowerShell = "/bin/bash", "pwsh"
+	r.PowerShell = "pwsh"
 	if got := strings.Join(toolNames(r), ","); got != "shell_exec,shell_script,shell_powershell" {
 		t.Fatalf("both shells: got %s", got)
 	}
 }
 
-func TestShellScriptRunsBash(t *testing.T) {
-	bash, err := exec.LookPath("bash")
-	if err != nil || runtime.GOOS == "windows" {
-		t.Skip("no system bash")
-	}
-	r := Runner{Scope: policy.NewScope(t.TempDir()), MaxOutput: 4096, DefaultTimeout: 5 * time.Second, Bash: bash}
+func TestShellScriptRunsEmbeddedInterpreter(t *testing.T) {
+	r := Runner{Scope: policy.NewScope(t.TempDir()), MaxOutput: 4096, DefaultTimeout: 5 * time.Second}
 	var tl tools.Tool
 	for _, x := range r.Tools() {
 		if x.Name() == "shell_script" {
 			tl = x
 		}
 	}
-	// [[ ]] and arrays are bash-only: this fails under a plain POSIX sh.
-	res, err := call(t, tl, context.Background(), map[string]any{"script": `a=(x y z); [[ ${#a[@]} -eq 3 ]] && echo "len=${#a[@]}" | tr a-z A-Z`})
-	if err != nil || !res.OK() || !strings.Contains(res.Output, "LEN=3") {
+	res, err := call(t, tl, context.Background(), map[string]any{"script": `a=(x y z); [[ ${#a[@]} -eq 3 ]] && echo "len=${#a[@]}"`})
+	if err != nil || !res.OK() || !strings.Contains(res.Output, "len=3") {
 		t.Fatalf("%v %+v", err, res)
 	}
 }
