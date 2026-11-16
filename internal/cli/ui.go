@@ -91,7 +91,6 @@ type UI struct {
 
 	// Optional hooks used by the full-screen chat UI.
 	approveFn   func(context.Context, executor.ApprovalRequest) (executor.ApprovalResponse, error)
-	onStatus    func(string) // current activity, "" when idle
 	onDelta     func(string) // a streamed chunk, shown live before markdown rendering
 	onPreview   func(string) // the text so far, periodically re-rendered as markdown while streaming
 	onDeltaDone func(string) // the turn's text, rendered as markdown ("" if there was none)
@@ -160,9 +159,6 @@ func (u *UI) Plan(steps []task.Step, hypothesis string) {
 }
 
 func (u *UI) ToolStart(summary string) {
-	if u.onStatus != nil {
-		u.onStatus(u.Redactor.Redact(summary))
-	}
 	if path, ok := strings.CutPrefix(summary, "fs_read "); ok {
 		fmt.Fprintln(u.Out, u.c(cBold, "Read: "+u.Redactor.Redact(path)))
 		return
@@ -190,9 +186,6 @@ func (u *UI) readManyCard(pathsStr string) {
 }
 
 func (u *UI) ToolEnd(o executor.Outcome) {
-	if u.onStatus != nil {
-		u.onStatus("")
-	}
 	switch o.Call.Name {
 	case "update_plan":
 		return
