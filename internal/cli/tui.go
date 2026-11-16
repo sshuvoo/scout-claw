@@ -6,13 +6,10 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -38,7 +35,6 @@ func (a *App) useTUI() bool {
 
 type (
 	outMsg     string
-	statusMsg  string
 	rtReadyMsg struct {
 		rt  *Runtime
 		err error
@@ -53,10 +49,12 @@ type (
 		req   executor.ApprovalRequest
 		reply chan executor.ApprovalResponse
 	}
-	clearQuitMsg struct{}
-	deltaMsg     string // a raw chunk of the model's reply, shown live
-	previewMsg   string // the reply so far, re-rendered as markdown mid-stream
-	deltaDoneMsg string // the reply rendered as markdown ("" if nothing streamed)
+	clearQuitMsg     struct{}
+	deltaMsg         string // a raw chunk of the model's reply, shown live
+	previewMsg       string // the reply so far, re-rendered as markdown mid-stream
+	deltaDoneMsg     string // the reply rendered as markdown ("" if nothing streamed)
+	loadingPhraseMsg struct{}
+	loadingTypeMsg   struct{}
 )
 
 type tuiWriter struct{ p *tea.Program }
@@ -80,9 +78,6 @@ var (
 	headerSt = lipgloss.NewStyle().Bold(true).Foreground(accent)
 	dimSt    = lipgloss.NewStyle().Foreground(subtle)
 	userSt   = lipgloss.NewStyle().Bold(true).Foreground(accent)
-	// Bubble Tea's three-point pulse stays on one terminal row and uses glyphs
-	// with predictable widths across terminal emulators.
-	scoutLoader = spinner.Points
 )
 
 const idleInputPlaceholder = "Describe a problem, or type / for commands…"
@@ -90,14 +85,7 @@ const idleInputPlaceholder = "Describe a problem, or type / for commands…"
 const loadingPhraseInterval = 4 * time.Second
 const loadingTypeInterval = 55 * time.Millisecond
 
-type (
-	loadingPhraseMsg struct{}
-	loadingTypeMsg   struct{}
-)
-
-// loadingPhrases are single words so they fit beside the loader in narrow
-// terminal footers. They rotate during longer tasks to make waiting feel
-// less static.
+// loadingPhrases are single words that rotate during longer tasks.
 var loadingPhrases = []string{
 	"thinking", "cooking", "melting", "plotting", "pondering", "scheming", "debugging", "untangling", "investigating", "spelunking",
 	"scanning", "searching", "tracing", "profiling", "compiling", "indexing", "parsing", "fetching", "querying", "reasoning",
@@ -123,14 +111,6 @@ type pendingApproval struct {
 	reply chan executor.ApprovalResponse
 }
 
-type pickerEntry struct {
-	path      string
-	name      string
-	directory bool
-	parent    bool
-	current   bool
-}
-
 type tuiModel struct {
 	app *App
 	cfg *config.Config
@@ -138,11 +118,9 @@ type tuiModel struct {
 	rt  *Runtime
 	ctx context.Context
 
-	vp   viewport.Model
-	ta   textarea.Model
-	ki   textinput.Model
-	spin spinner.Model
-
+	vp         viewport.Model
+	ta         textarea.Model
+	ki         textinput.Model
 	transcript string // raw text with ANSI codes, wrapped at render time
 	streaming  string // the current reply's raw text, live while it streams in
 	w, h       int
@@ -150,22 +128,10 @@ type tuiModel struct {
 
 	running       bool
 	cancel        context.CancelFunc
-	activity      string
 	loadingPhrase string
 	loadingShown  int
 	approval      *pendingApproval
 	quitArmed     bool
-
-	references          []string
-	pickerOpen          bool
-	pickerPath          string
-	pickerEntries       []pickerEntry
-	pickerSelected      map[string]bool
-	pickerCursor        int
-	pickerOffset        int
-	pickerError         string
-	lastPickerClickPath string
-	lastPickerClickAt   time.Time
 
 	history     []string
 	histIdx     int // len(history) means "current draft"
@@ -206,7 +172,6 @@ func (a *App) runTUI(cmd *cobra.Command, cfg *config.Config, sess *session.Sessi
 			return executor.ApprovalResponse{}, ctx.Err()
 		}
 	}
-	ui.onStatus = func(s string) { prog.Send(statusMsg(s)) }
 	ui.onDelta = func(s string) { prog.Send(deltaMsg(s)) }
 	ui.onPreview = func(s string) { prog.Send(previewMsg(s)) }
 	ui.onDeltaDone = func(s string) { prog.Send(deltaDoneMsg(s)) }
@@ -245,10 +210,7 @@ func newTUIModel(a *App, ctx context.Context, cfg *config.Config, ui *UI) *tuiMo
 	ki.EchoCharacter = '•'
 	ki.Placeholder = "paste your OpenAI API key, then Enter"
 
-	sp := spinner.New(spinner.WithSpinner(scoutLoader))
-	sp.Style = lipgloss.NewStyle().Foreground(accent)
-
-	m := &tuiModel{app: a, cfg: cfg, ui: ui, ctx: ctx, ta: ta, ki: ki, spin: sp}
+	m := &tuiModel{app: a, cfg: cfg, ui: ui, ctx: ctx, ta: ta, ki: ki}
 	m.vp = viewport.New(0, 0)
 	m.histIdx = 0
 	return m
@@ -308,7 +270,7 @@ func (m *tuiModel) landingView() string {
 	if pop := m.popup(); pop != "" {
 		parts = append(parts, lipgloss.NewStyle().Width(bw).Render(pop))
 	} else {
-		parts = append(parts, fit(dimSt.Render("Enter send · Ctrl+J newline · Ctrl+O references · / commands · Ctrl+C quit")))
+		parts = append(parts, fit(dimSt.Render("Enter send · Ctrl+J newline · / commands · Ctrl+C quit")))
 	}
 	block := lipgloss.JoinVertical(lipgloss.Center, parts...)
 	return lipgloss.Place(m.w, m.h-1, lipgloss.Center, lipgloss.Center, block) + "\n" + m.statusBar(m.w)
@@ -327,10 +289,6 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.appendRaw(string(msg))
 		return m, nil
 
-	case statusMsg:
-		m.activity = string(msg)
-		return m, nil
-
 	case loadingPhraseMsg:
 		if m.running {
 			m.loadingPhrase = nextLoadingPhrase(m.loadingPhrase)
@@ -344,7 +302,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case loadingTypeMsg:
 		if m.running {
-			full := []rune(m.loadingPhrase + "...")
+			full := []rune(capitalizeFirst(m.loadingPhrase) + "...")
 			if m.loadingShown < len(full) {
 				m.loadingShown++
 				if m.loadingShown < len(full) {
@@ -392,7 +350,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case taskDoneMsg:
-		m.running, m.activity, m.loadingPhrase, m.cancel = false, "", "", nil
+		m.running, m.loadingPhrase, m.cancel = false, "", nil
 		m.loadingShown = 0
 		m.ta.Placeholder = idleInputPlaceholder
 		m.tokensIn += msg.res.Usage.InputTokens
@@ -423,37 +381,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.quitArmed = false
 		return m, nil
 
-	case spinner.TickMsg:
-		if m.running {
-			var c tea.Cmd
-			m.spin, c = m.spin.Update(msg)
-			return m, c
-		}
-		return m, nil
-
 	case tea.MouseMsg:
-		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft {
-			if m.pickerOpen {
-				m.pickerClick(msg.X, msg.Y)
-				return m, nil
-			}
-			buttonStart := hPad
-			if m.landing() {
-				buttonStart = 0
-			}
-			if msg.Y == m.h-1 && msg.X >= buttonStart && msg.X < buttonStart+m.referenceButtonWidth() && m.mode == modeChat && m.approval == nil && !m.quitArmed {
-				m.openReferencePicker()
-				return m, nil
-			}
-		}
-		if m.pickerOpen && tea.MouseEvent(msg).IsWheel() {
-			if msg.Button == tea.MouseButtonWheelUp {
-				m.movePicker(-3)
-			} else if msg.Button == tea.MouseButtonWheelDown {
-				m.movePicker(3)
-			}
-			return m, nil
-		}
 		var c tea.Cmd
 		m.vp, c = m.vp.Update(msg)
 		return m, c
@@ -511,10 +439,6 @@ func (m *tuiModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.ki, c = m.ki.Update(msg)
 		return m, c
 	}
-	if m.pickerOpen {
-		return m.onPickerKey(msg)
-	}
-
 	switch k {
 	case "ctrl+c":
 		if m.running && m.cancel != nil {
@@ -537,9 +461,6 @@ func (m *tuiModel) onKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+l":
 		m.transcript = ""
 		m.refresh(true)
-		return m, nil
-	case "ctrl+o":
-		m.openReferencePicker()
 		return m, nil
 	case "pgup", "pgdown":
 		var c tea.Cmd
@@ -616,13 +537,6 @@ func (m *tuiModel) submit() tea.Cmd {
 		return nil
 	}
 	m.appendRaw("\n" + userSt.Render("❯ "+strings.ReplaceAll(text, "\n", "\n  ")) + "\n")
-	if len(m.references) > 0 {
-		short := make([]string, len(m.references))
-		for i, path := range m.references {
-			short[i] = shortPath(path)
-		}
-		m.appendRaw(dimSt.Render("  ↳ references: "+strings.Join(short, ", ")) + "\n")
-	}
 	ctx, cancel := context.WithCancel(m.ctx)
 	m.cancel, m.running, m.hadTask = cancel, true, true
 	m.loadingPhrase = nextLoadingPhrase("")
@@ -631,14 +545,12 @@ func (m *tuiModel) submit() tea.Cmd {
 	m.note = ""
 	m.layout()
 	rt := m.rt
-	taskPrompt := withReferencePaths(text, m.references)
 	run := func() tea.Msg {
 		defer cancel()
-		return taskDoneMsg{rt.RunTask(ctx, taskPrompt)}
+		return taskDoneMsg{rt.RunTask(ctx, text)}
 	}
 	return tea.Batch(
 		run,
-		m.spin.Tick,
 		tea.Tick(loadingTypeInterval, func(time.Time) tea.Msg { return loadingTypeMsg{} }),
 		tea.Tick(loadingPhraseInterval, func(time.Time) tea.Msg { return loadingPhraseMsg{} }),
 	)
@@ -655,246 +567,17 @@ func nextLoadingPhrase(current string) string {
 	return loadingPhrases[i]
 }
 
-func withReferencePaths(prompt string, paths []string) string {
-	if len(paths) == 0 {
-		return prompt
+func capitalizeFirst(word string) string {
+	if word == "" {
+		return ""
 	}
-	var b strings.Builder
-	b.WriteString(prompt)
-	b.WriteString("\n\nSelected read-only reference paths (these do not expand the writable workspace; inspect them only as needed):\n")
-	for _, path := range paths {
-		fmt.Fprintf(&b, "- %s\n", path)
-	}
-	return b.String()
+	return strings.ToUpper(word[:1]) + word[1:]
 }
 
-func (m *tuiModel) openReferencePicker() {
-	m.pickerOpen = true
-	m.pickerPath = m.cfg.Workspace
-	m.pickerSelected = make(map[string]bool, len(m.references))
-	for _, path := range m.references {
-		m.pickerSelected[path] = true
-	}
-	m.pickerCursor, m.pickerOffset = 0, 0
-	m.readPickerDir(m.pickerPath)
-	m.layout()
-}
-
-func (m *tuiModel) readPickerDir(path string) {
-	abs, err := filepath.Abs(filepath.Clean(path))
-	if err != nil {
-		m.pickerError = err.Error()
-		return
-	}
-	entries, err := os.ReadDir(abs)
-	m.pickerPath = abs
-	m.pickerEntries = nil
-	m.pickerError = ""
-	if parent := filepath.Dir(abs); parent != abs {
-		m.pickerEntries = append(m.pickerEntries, pickerEntry{path: parent, name: "..", directory: true, parent: true})
-	}
-	m.pickerEntries = append([]pickerEntry{{path: abs, name: ". (this folder)", directory: true, current: true}}, m.pickerEntries...)
-	if err != nil {
-		m.pickerError = err.Error()
-	} else {
-		for _, entry := range entries {
-			info, err := entry.Info()
-			if err != nil {
-				continue
-			}
-			m.pickerEntries = append(m.pickerEntries, pickerEntry{
-				path: filepath.Join(abs, entry.Name()), name: entry.Name(), directory: info.IsDir(),
-			})
-		}
-	}
-	if m.pickerCursor >= len(m.pickerEntries) {
-		m.pickerCursor = max(len(m.pickerEntries)-1, 0)
-	}
-	m.keepPickerCursorVisible()
-}
-
-func (m *tuiModel) pickerHeight() int { return max(m.h-3, 4) }
-
-func (m *tuiModel) pickerVisibleRows() int { return max(m.pickerHeight()-3, 1) }
-
-func (m *tuiModel) keepPickerCursorVisible() {
-	visible := m.pickerVisibleRows()
-	if m.pickerCursor < m.pickerOffset {
-		m.pickerOffset = m.pickerCursor
-	} else if m.pickerCursor >= m.pickerOffset+visible {
-		m.pickerOffset = m.pickerCursor - visible + 1
-	}
-	m.pickerOffset = max(m.pickerOffset, 0)
-}
-
-func (m *tuiModel) movePicker(delta int) {
-	if len(m.pickerEntries) == 0 {
-		return
-	}
-	m.pickerCursor = min(max(m.pickerCursor+delta, 0), len(m.pickerEntries)-1)
-	m.keepPickerCursorVisible()
-}
-
-func (m *tuiModel) togglePickerSelection(entry pickerEntry) {
-	if entry.parent {
-		return
-	}
-	if m.pickerSelected[entry.path] {
-		delete(m.pickerSelected, entry.path)
-	} else {
-		m.pickerSelected[entry.path] = true
-	}
-}
-
-func (m *tuiModel) openPickerEntry(entry pickerEntry) {
-	if entry.current {
-		m.togglePickerSelection(entry)
-		return
-	}
-	if entry.directory {
-		m.pickerCursor, m.pickerOffset = 0, 0
-		m.readPickerDir(entry.path)
-		return
-	}
-	m.togglePickerSelection(entry)
-}
-
-func (m *tuiModel) finishReferencePicker() {
-	m.references = m.references[:0]
-	for path := range m.pickerSelected {
-		m.references = append(m.references, path)
-	}
-	sort.Strings(m.references)
-	m.pickerOpen = false
-	m.pickerSelected = nil
-	m.layout()
-	m.refresh(false)
-}
-
-func (m *tuiModel) cancelReferencePicker() {
-	m.pickerOpen = false
-	m.pickerSelected = nil
-	m.layout()
-	m.refresh(false)
-}
-
-func (m *tuiModel) onPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc", "ctrl+c":
-		m.cancelReferencePicker()
-	case "up":
-		m.movePicker(-1)
-	case "down":
-		m.movePicker(1)
-	case "pgup":
-		m.movePicker(-m.pickerVisibleRows())
-	case "pgdown":
-		m.movePicker(m.pickerVisibleRows())
-	case "backspace", "left":
-		parent := filepath.Dir(m.pickerPath)
-		if parent != m.pickerPath {
-			m.readPickerDir(parent)
-		}
-	case " ", "space":
-		if len(m.pickerEntries) > 0 {
-			m.togglePickerSelection(m.pickerEntries[m.pickerCursor])
-		}
-	case "enter", "right":
-		if len(m.pickerEntries) > 0 {
-			m.openPickerEntry(m.pickerEntries[m.pickerCursor])
-		}
-	case "tab":
-		m.finishReferencePicker()
-	}
-	return m, nil
-}
-
-func (m *tuiModel) pickerClick(x, y int) {
-	buttonStart := hPad
-	if m.pickerDoneButtonWidth() > 0 && y == m.h-1 && x >= buttonStart && x < buttonStart+m.pickerDoneButtonWidth() {
-		m.finishReferencePicker()
-		return
-	}
-	firstRow := 5 // header, path, instructions, then entries
-	index := m.pickerOffset + y - firstRow
-	if y < firstRow || index < 0 || index >= len(m.pickerEntries) || y >= firstRow+m.pickerVisibleRows() {
-		return
-	}
-	m.pickerCursor = index
-	entry := m.pickerEntries[index]
-	if entry.parent {
-		m.openPickerEntry(entry)
-		return
-	}
-	if entry.directory && !entry.current && m.lastPickerClickPath == entry.path && time.Since(m.lastPickerClickAt) < 600*time.Millisecond {
-		m.lastPickerClickAt = time.Time{}
-		m.openPickerEntry(entry)
-		return
-	}
-	m.lastPickerClickPath, m.lastPickerClickAt = entry.path, time.Now()
-	m.togglePickerSelection(entry)
-}
-
-func (m *tuiModel) referenceButtonText() string {
-	if len(m.references) == 0 {
-		return "＋ References"
-	}
-	return fmt.Sprintf("＋ References (%d)", len(m.references))
-}
-
-func (m *tuiModel) referenceButtonWidth() int { return lipgloss.Width(m.referenceButtonText()) }
-
-func (m *tuiModel) pickerDoneButtonText() string {
-	return fmt.Sprintf("✓ Add selected (%d)", len(m.pickerSelected))
-}
-
-func (m *tuiModel) pickerDoneButtonWidth() int { return lipgloss.Width(m.pickerDoneButtonText()) }
-
-func (m *tuiModel) pickerView() string {
-	height, width := m.pickerHeight(), m.innerW()
-	lines := make([]string, height)
-	lines[0] = headerSt.Render("Add reference files or folders")
-	lines[1] = dimSt.Render(ansi.Truncate(m.pickerPath, width, "…"))
-	if m.pickerError != "" {
-		lines[1] += "  " + lipgloss.NewStyle().Foreground(errCol).Render(ansi.Truncate(m.pickerError, max(width-lipgloss.Width(lines[1])-2, 0), "…"))
-	}
-	lines[2] = dimSt.Render("↑↓ move · click/Space select · Enter open · Backspace parent · Tab done")
-	visible := max(height-3, 1)
-	for row := 0; row < visible; row++ {
-		index := m.pickerOffset + row
-		if index >= len(m.pickerEntries) {
-			break
-		}
-		entry := m.pickerEntries[index]
-		mark := " "
-		if m.pickerSelected[entry.path] {
-			mark = "✓"
-		}
-		name := entry.name
-		if entry.directory && !entry.parent && !entry.current {
-			name += string(filepath.Separator)
-		}
-		cursor := " "
-		if index == m.pickerCursor {
-			cursor = "▸"
-		}
-		line := fmt.Sprintf(" %s [%s] %s", cursor, mark, name)
-		if index == m.pickerCursor {
-			line = lipgloss.NewStyle().Foreground(accent).Bold(true).Render(line)
-		}
-		lines[row+3] = ansi.Truncate(line, width, "…")
-	}
-	return strings.Join(lines, "\n")
-}
-
-func (m *tuiModel) activityView() string {
-	full := []rune(m.loadingPhrase + "...")
+func (m *tuiModel) loadingTextView() string {
+	full := []rune(capitalizeFirst(m.loadingPhrase) + "...")
 	status := string(full[:min(m.loadingShown, len(full))])
-	line := m.spin.View() + "  " + lipgloss.NewStyle().Foreground(accent).Render(status)
-	if m.activity != "" && m.loadingShown >= len(full) {
-		line += dimSt.Render(" · $ " + m.activity)
-	}
-	return ansi.Truncate(line, m.innerW(), "…")
+	return lipgloss.NewStyle().Foreground(accent).Render(ansi.Truncate(status, m.innerW(), "…"))
 }
 
 func (m *tuiModel) runSlash(line string) tea.Cmd {
@@ -910,7 +593,7 @@ func (m *tuiModel) runSlash(line string) tea.Cmd {
 		m.enterKeyMode("")
 		return nil
 	case "/help":
-		m.appendRaw(helpText + "\nKeys: Enter send · Ctrl+J newline · ↑/↓ prompt history · Tab complete · Ctrl+O references · PgUp/PgDn scroll · Ctrl+L clear · Ctrl+C cancel · Ctrl+D quit\n\n")
+		m.appendRaw(helpText + "\nKeys: Enter send · Ctrl+J newline · ↑/↓ prompt history · Tab complete · PgUp/PgDn scroll · Ctrl+L clear · Ctrl+C cancel · Ctrl+D quit\n\n")
 		return nil
 	}
 	if m.rt == nil {
@@ -1055,10 +738,6 @@ func (m *tuiModel) layout() {
 	if m.w == 0 {
 		return
 	}
-	if m.pickerOpen {
-		m.vp.Width, m.vp.Height = m.innerW(), m.pickerHeight()
-		return
-	}
 	m.ta.SetWidth(m.boxW() - 4)
 	m.ta.SetHeight(m.inputHeight())
 	m.ki.Width = m.boxW() - 16
@@ -1068,11 +747,11 @@ func (m *tuiModel) layout() {
 	} else {
 		box = m.inputHeight() + 2
 	}
-	activity := 0
+	statusRows := 0
 	if m.running {
-		activity = 1 // single-line animated loader above the input box
+		statusRows = 1 // one-line typewriter status above the input box
 	}
-	h := m.h - 2 - box - m.popupHeight() - activity - 1 // top margin, header, input, activity, popup, status
+	h := m.h - 2 - box - m.popupHeight() - statusRows - 1 // top margin, header, input, status text, popup, status bar
 	m.vp.Width, m.vp.Height = m.innerW(), max(h, 3)
 	m.ui.Width = m.innerW()
 }
@@ -1082,10 +761,6 @@ func (m *tuiModel) approvalBoxHeight() int { return 4 } // two content lines + b
 func (m *tuiModel) View() string {
 	if m.w == 0 {
 		return ""
-	}
-	if m.pickerOpen {
-		parts := []string{"", ansi.Truncate(headerSt.Render("ScoutClaw")+dimSt.Render("  ·  references"), m.innerW(), "…"), m.pickerView(), m.statusBar(m.innerW())}
-		return padLeft(lipgloss.JoinVertical(lipgloss.Left, parts...), hPad)
 	}
 	if m.landing() {
 		return m.landingView()
@@ -1100,7 +775,7 @@ func (m *tuiModel) View() string {
 		parts = append(parts, p)
 	}
 	if m.running {
-		parts = append(parts, m.activityView())
+		parts = append(parts, m.loadingTextView())
 	}
 	parts = append(parts, m.inputBox(), m.statusBar(m.innerW()))
 	return padLeft(lipgloss.JoinVertical(lipgloss.Left, parts...), hPad)
@@ -1171,26 +846,17 @@ func (m *tuiModel) popup() string {
 func (m *tuiModel) statusBar(w int) string {
 	var left string
 	var right string
-	if m.pickerOpen {
-		left = lipgloss.NewStyle().Foreground(accent).Bold(true).Render(m.pickerDoneButtonText())
-		right = dimSt.Render("click rows or Space to select · Enter opens · Tab done · Esc cancels")
-		if w-lipgloss.Width(left)-lipgloss.Width(right) < 1 {
-			right = ""
-		}
-		return left + strings.Repeat(" ", max(w-lipgloss.Width(left)-lipgloss.Width(right), 0)) + right
-	}
-	button := lipgloss.NewStyle().Foreground(accent).Bold(true).Render(m.referenceButtonText())
 	switch {
 	case m.approval != nil:
 		left = lipgloss.NewStyle().Foreground(warnCol).Render("⚠ waiting for your approval")
 	case m.running:
-		left = button + "  " + lipgloss.NewStyle().Foreground(warnCol).Render("● working · Ctrl+C cancels")
+		left = lipgloss.NewStyle().Foreground(warnCol).Render("● working · Ctrl+C cancels")
 	case m.quitArmed:
 		left = lipgloss.NewStyle().Foreground(warnCol).Render("press Ctrl+C again to quit")
 	case m.mode == modeKey:
 		left = dimSt.Render("Enter saves · Esc cancels")
 	default:
-		left = button + "  " + lipgloss.NewStyle().Foreground(okCol).Render("● ready")
+		left = lipgloss.NewStyle().Foreground(okCol).Render("● ready")
 	}
 	// Right-hand details by priority: the workspace path is the first to go when space is short.
 	tok := fmt.Sprintf("tokens %s/%s · cached %s", human(m.tokensIn), human(m.tokensOu), human(m.tokensCache))
