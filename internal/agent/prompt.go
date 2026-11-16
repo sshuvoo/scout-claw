@@ -26,8 +26,6 @@ SAFETY
 
 Be direct and concise. For simple conversational questions, answer plainly without claiming to have used tools.`
 
-const SmallTalkSystemPrompt = `You are ScoutClaw, an AI assistant in a command-line app. Reply briefly and naturally. You can help with computer administration, diagnostics, automation, files, and software. Do not claim to have inspected or changed anything unless you did so.`
-
 // TaskContext builds the first message of a session: environment facts plus the request.
 func TaskContext(cfg *config.Config, p platform.Info, prompt string) string {
 	return TaskContextWithHistory(cfg, p, prompt, "")
