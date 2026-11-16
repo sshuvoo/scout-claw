@@ -115,16 +115,17 @@ type tuiModel struct {
 	approval  *pendingApproval
 	quitArmed bool
 
-	history  []string
-	histIdx  int // len(history) means "current draft"
-	draft    string
-	sugIdx   int
-	tokensIn int64
-	tokensOu int64
-	firstKey bool   // no API key at start
-	hadTask  bool   // a task has been started: leave the landing screen for good
-	note     string // message shown on the landing screen (e.g. first-run key prompt)
-	build    func() tea.Msg
+	history     []string
+	histIdx     int // len(history) means "current draft"
+	draft       string
+	sugIdx      int
+	tokensIn    int64
+	tokensCache int64
+	tokensOu    int64
+	firstKey    bool   // no API key at start
+	hadTask     bool   // a task has been started: leave the landing screen for good
+	note        string // message shown on the landing screen (e.g. first-run key prompt)
+	build       func() tea.Msg
 }
 
 func (a *App) runTUI(cmd *cobra.Command, cfg *config.Config, sess *session.Session) error {
@@ -318,6 +319,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case taskDoneMsg:
 		m.running, m.activity, m.cancel = false, "", nil
 		m.tokensIn += msg.res.Usage.InputTokens
+		m.tokensCache += msg.res.Usage.CachedInputTokens
 		m.tokensOu += msg.res.Usage.OutputTokens
 		m.approval = nil
 		if m.streaming != "" { // the task ended (error/cancel) before EndTurn rendered it
@@ -795,7 +797,7 @@ func (m *tuiModel) statusBar(w int) string {
 		left = lipgloss.NewStyle().Foreground(okCol).Render("● ready")
 	}
 	// Right-hand details by priority: the workspace path is the first to go when space is short.
-	tok := fmt.Sprintf("tokens %s/%s", human(m.tokensIn), human(m.tokensOu))
+	tok := fmt.Sprintf("tokens %s/%s · cached %s", human(m.tokensIn), human(m.tokensOu), human(m.tokensCache))
 	var right string
 	for _, cand := range []string{
 		fmt.Sprintf("%s · %s · %s · %s", m.cfg.Model, m.cfg.Approval, shortPath(m.cfg.Workspace), tok),

@@ -62,6 +62,61 @@ func tc(id, name string, args any) llm.ToolCall {
 	return llm.ToolCall{ID: id, Name: name, Arguments: string(b)}
 }
 
+func TestSmallTalkSkipsEnvironmentAndToolSchemas(t *testing.T) {
+	r := newRig(t, config.ApprovalAuto, llm.Reply("Hello!"))
+	r.a.Preamble = func(string) string { return "large environment context" }
+	res := r.a.Run(context.Background(), "hello")
+	if res.Status != StatusCompleted {
+		t.Fatalf("status = %s, err=%v", res.Status, res.Err)
+	}
+	got := r.llm.Requests[0]
+	if got.UserText != "hello" || got.Instructions != SmallTalkSystemPrompt || len(got.Tools) != 0 {
+		t.Fatalf("small-talk request included agent context: %+v", got)
+	}
+}
+
+func TestNewTaskStartsFreshProviderChain(t *testing.T) {
+	r := newRig(t, config.ApprovalAuto, llm.Reply("first"), llm.Reply("second"))
+	if res := r.a.Run(context.Background(), "first task"); res.Status != StatusCompleted {
+		t.Fatal(res.Err)
+	}
+	if r.a.PreviousID == "" {
+		t.Fatal("first task did not receive provider response ID")
+	}
+	if res := r.a.Run(context.Background(), "second task"); res.Status != StatusCompleted {
+		t.Fatal(res.Err)
+	}
+	if got := r.llm.Requests[1].PreviousID; got != "" {
+		t.Fatalf("new task chained to old response %q", got)
+	}
+}
+
+func TestToolRoutingKeepsRelevantFamiliesAndFallsBackWhenUnclear(t *testing.T) {
+	r := newRig(t, config.ApprovalAuto, llm.Reply("ok"))
+	files := r.a.specsFor("create a file in this project")
+	hasFile, hasShell, hasNetwork := false, false, false
+	for _, spec := range files {
+		hasFile = hasFile || spec.Name == "fs_write"
+		hasShell = hasShell || spec.Name == "shell_exec"
+		hasNetwork = hasNetwork || strings.HasPrefix(spec.Name, "net_")
+	}
+	if !hasFile || !hasShell || hasNetwork || len(files) >= len(r.a.specs()) {
+		t.Fatalf("file task received a poor tool set: %v", toolNames(files))
+	}
+	unclear := r.a.specsFor("tell me something surprising")
+	if len(unclear) != len(r.a.specs()) {
+		t.Fatalf("unclear request lost tools: %v", toolNames(unclear))
+	}
+}
+
+func toolNames(specs []llm.ToolSpec) []string {
+	out := make([]string, len(specs))
+	for i, spec := range specs {
+		out[i] = spec.Name
+	}
+	return out
+}
+
 func TestMultiStepFixAndVerify(t *testing.T) {
 	var r *rig
 	r = newRig(t, config.ApprovalAuto,

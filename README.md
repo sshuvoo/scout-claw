@@ -121,7 +121,7 @@ The project is the nearest folder at or above the workspace that has a `.scout/`
 | `SCOUTCLAW_TASK_TIMEOUT` | `30m` | Whole-task timeout. |
 | `SCOUTCLAW_MAX_OUTPUT` | `16384` | Bytes of tool output kept per call. |
 | `SCOUTCLAW_MAX_READ` | `65536` | Bytes of file content `fs_read` may return per call (4096–1048576). |
-| `SCOUTCLAW_COMPACT_AT` | `200000` | When the conversation reaches this many tokens, the provider compacts earlier turns (OpenAI Responses `context_management`), and ScoutClaw restates the task and plan to the model. `0` turns it off; servers that do not support it are detected and it is skipped. Minimum 20000. `/status` shows the current conversation size. |
+| `SCOUTCLAW_COMPACT_AT` | `50000` | When a multi-step task reaches this many tokens, the provider compacts earlier turns (OpenAI Responses `context_management`), and ScoutClaw restates the task and plan to the model. Separate user tasks start a fresh provider chain and carry a short local recap. `0` turns compaction off; servers that do not support it are detected and it is skipped. Minimum 20000. `/status` shows the current task context size. |
 | `SCOUTCLAW_STATE_DIR` | `~/.local/state/scoutclaw` | Sessions, audit log, file backups (mode 0600/0700). |
 
 Invalid values fail at startup with a clear message. `scout config` shows the effective values (key masked).

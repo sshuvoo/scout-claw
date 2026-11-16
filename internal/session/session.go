@@ -25,6 +25,7 @@ type TaskRecord struct {
 	Finished  time.Time `json:"finished"`
 	Steps     int       `json:"steps"`
 	TokensIn  int64     `json:"tokens_in,omitempty"`
+	CachedIn  int64     `json:"tokens_in_cached,omitempty"`
 	TokensOut int64     `json:"tokens_out,omitempty"`
 }
 
@@ -40,7 +41,7 @@ type Session struct {
 	Updated    time.Time    `json:"updated"`
 	Workspace  string       `json:"workspace"`
 	Model      string       `json:"model"`
-	ResponseID string       `json:"response_id,omitempty"`     // provider-side conversation pointer for resuming
+	ResponseID string       `json:"response_id,omitempty"`     // provider pointer retained only for pending tool outputs
 	Pending    []Pending    `json:"pending_outputs,omitempty"` // tool outputs the provider still expects
 	Tasks      []TaskRecord `json:"tasks"`
 
