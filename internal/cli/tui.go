@@ -80,12 +80,9 @@ var (
 	headerSt = lipgloss.NewStyle().Bold(true).Foreground(accent)
 	dimSt    = lipgloss.NewStyle().Foreground(subtle)
 	userSt   = lipgloss.NewStyle().Bold(true).Foreground(accent)
-	// Triangle geometry stays fixed while one highlighted segment travels its
-	// perimeter, matching the edge-motion loader used by ScoutClaw.
-	scoutLoader = spinner.Spinner{
-		Frames: triangleLoaderFrames(),
-		FPS:    110 * time.Millisecond,
-	}
+	// Bubble Tea's three-point pulse stays on one terminal row and uses glyphs
+	// with predictable widths across terminal emulators.
+	scoutLoader = spinner.Points
 )
 
 const idleInputPlaceholder = "Describe a problem, or type / for commands…"
@@ -132,43 +129,6 @@ type pickerEntry struct {
 	directory bool
 	parent    bool
 	current   bool
-}
-
-type trianglePoint struct{ row, col int }
-
-func triangleLoaderFrames() []string {
-	grid := [][]rune{
-		[]rune("   ╱╲  "),
-		[]rune("  ╱  ╲ "),
-		[]rune(" ╱───╲ "),
-	}
-	// Walk clockwise: left edge down, base across, then right edge up.
-	path := []trianglePoint{
-		{0, 3}, {1, 2}, {2, 1}, {2, 2}, {2, 3}, {2, 4}, {2, 5}, {1, 5}, {0, 4},
-	}
-	bright := lipgloss.NewStyle().Foreground(accent)
-	dim := lipgloss.NewStyle().Foreground(subtle)
-	frames := make([]string, len(path))
-	for active, point := range path {
-		rows := make([]string, len(grid))
-		for row, cells := range grid {
-			var b strings.Builder
-			for col, cell := range cells {
-				if cell == ' ' {
-					b.WriteRune(cell)
-					continue
-				}
-				style := dim
-				if point.row == row && point.col == col {
-					style = bright
-				}
-				b.WriteString(style.Render(string(cell)))
-			}
-			rows[row] = b.String()
-		}
-		frames[active] = strings.Join(rows, "\n")
-	}
-	return frames
 }
 
 type tuiModel struct {
@@ -286,7 +246,7 @@ func newTUIModel(a *App, ctx context.Context, cfg *config.Config, ui *UI) *tuiMo
 	ki.Placeholder = "paste your OpenAI API key, then Enter"
 
 	sp := spinner.New(spinner.WithSpinner(scoutLoader))
-	sp.Style = lipgloss.NewStyle()
+	sp.Style = lipgloss.NewStyle().Foreground(accent)
 
 	m := &tuiModel{app: a, cfg: cfg, ui: ui, ctx: ctx, ta: ta, ki: ki, spin: sp}
 	m.vp = viewport.New(0, 0)
@@ -928,18 +888,13 @@ func (m *tuiModel) pickerView() string {
 }
 
 func (m *tuiModel) activityView() string {
-	lines := strings.Split(m.spin.View(), "\n")
-	if len(lines) < 2 {
-		return m.spin.View()
-	}
 	full := []rune(m.loadingPhrase + "...")
 	status := string(full[:min(m.loadingShown, len(full))])
+	line := m.spin.View() + "  " + lipgloss.NewStyle().Foreground(accent).Render(status)
 	if m.activity != "" && m.loadingShown >= len(full) {
-		status += " · $ " + m.activity
+		line += dimSt.Render(" · $ " + m.activity)
 	}
-	status = ansi.Truncate(status, max(m.innerW()-9, 1), "…")
-	lines[1] += "  " + lipgloss.NewStyle().Foreground(accent).Render(status)
-	return strings.Join(lines, "\n")
+	return ansi.Truncate(line, m.innerW(), "…")
 }
 
 func (m *tuiModel) runSlash(line string) tea.Cmd {
@@ -1115,7 +1070,7 @@ func (m *tuiModel) layout() {
 	}
 	activity := 0
 	if m.running {
-		activity = 3 // fixed triangle loader above the input box
+		activity = 1 // single-line animated loader above the input box
 	}
 	h := m.h - 2 - box - m.popupHeight() - activity - 1 // top margin, header, input, activity, popup, status
 	m.vp.Width, m.vp.Height = m.innerW(), max(h, 3)
