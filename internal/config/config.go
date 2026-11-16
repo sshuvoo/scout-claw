@@ -39,10 +39,9 @@ const (
 	MaxMaxSteps     = 500
 )
 
-// DefaultCompactAt keeps long coding sessions well inside current context
-// windows and bounds what every turn costs.
+// DefaultCompactAt bounds the context retained during a long, multi-step task.
 const (
-	DefaultCompactAt = 200_000
+	DefaultCompactAt = 50_000
 	MinCompactAt     = 20_000
 )
 

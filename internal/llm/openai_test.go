@@ -39,7 +39,7 @@ func (f *fakeResponses) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		output = `{"type":"compaction","id":"c1","encrypted_content":"opaque"},` + output
 	}
 	resp := `{"id":"resp_1","object":"response","created_at":0,"status":"completed","model":"m","output":[` + output + `],` +
-		`"usage":{"input_tokens":1234,"output_tokens":5,"total_tokens":1239,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}},` +
+		`"usage":{"input_tokens":1234,"output_tokens":5,"total_tokens":1239,"input_tokens_details":{"cached_tokens":321},"output_tokens_details":{"reasoning_tokens":0}},` +
 		`"parallel_tool_calls":true,"tool_choice":"auto","tools":[]}`
 	w.Header().Set("Content-Type", "text/event-stream")
 	fmt.Fprintf(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\",\"sequence_number\":1}\n\n")
@@ -71,7 +71,7 @@ func TestOpenAISendsCompactionAndDetectsIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !resp.Compacted || resp.Text != "hello" || resp.Usage.InputTokens != 1234 || streamed.String() != "hello" {
+	if !resp.Compacted || resp.Text != "hello" || resp.Usage.InputTokens != 1234 || resp.Usage.CachedInputTokens != 321 || streamed.String() != "hello" {
 		t.Fatalf("response: %+v streamed=%q", resp, streamed.String())
 	}
 	cm, ok := f.body(0)["context_management"].([]any)

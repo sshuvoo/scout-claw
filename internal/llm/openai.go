@@ -105,9 +105,12 @@ func (o *OpenAI) generate(ctx context.Context, req Request, compact bool) (*Resp
 		return nil, classify(ctx, err)
 	}
 	out := &Response{
-		ID:    resp.ID,
-		Text:  strings.TrimSpace(resp.OutputText()),
-		Usage: Usage{InputTokens: resp.Usage.InputTokens, OutputTokens: resp.Usage.OutputTokens},
+		ID:   resp.ID,
+		Text: strings.TrimSpace(resp.OutputText()),
+		Usage: Usage{
+			InputTokens: resp.Usage.InputTokens, CachedInputTokens: resp.Usage.InputTokensDetails.CachedTokens,
+			OutputTokens: resp.Usage.OutputTokens,
+		},
 	}
 	for _, item := range resp.Output {
 		switch item.Type {

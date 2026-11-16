@@ -307,8 +307,8 @@ func (u *UI) PrintResult(r agent.Result) {
 	line := u.c(cGray, strings.Repeat("─", 60))
 	fmt.Fprintln(u.Out, line)
 	defer func() {
-		fmt.Fprintln(u.Out, u.c(cGray, fmt.Sprintf("%d steps · %s · tokens in/out %d/%d",
-			r.Steps, r.Elapsed.Round(100*time.Millisecond), r.Usage.InputTokens, r.Usage.OutputTokens)))
+		fmt.Fprintln(u.Out, u.c(cGray, fmt.Sprintf("%d steps · %s · tokens in/out %d/%d · cached input %d",
+			r.Steps, r.Elapsed.Round(100*time.Millisecond), r.Usage.InputTokens, r.Usage.OutputTokens, r.Usage.CachedInputTokens)))
 	}()
 
 	switch r.Status {

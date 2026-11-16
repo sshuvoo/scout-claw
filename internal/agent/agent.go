@@ -87,6 +87,13 @@ type Result struct {
 
 func (a *Agent) Run(ctx context.Context, prompt string) Result {
 	start := time.Now()
+	// Keep provider history for tool-loop continuations, but do not replay an
+	// entire completed task chain for each new user request. Pending tool
+	// outputs are the exception: they must be delivered on their original chain.
+	if len(a.Carry) == 0 {
+		a.PreviousID = ""
+	}
+	a.ContextTokens = 0
 	rep := a.Reporter
 	if rep == nil {
 		rep = nopReporter{}
@@ -111,7 +118,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) Result {
 	}
 	a.Audit.Log(audit.Event{SessionID: a.SessionID, Kind: "task_end", Data: map[string]any{
 		"status": res.Status, "verification": res.Verify, "steps": res.Steps, "elapsed_ms": res.Elapsed.Milliseconds(),
-		"tokens_in": res.Usage.InputTokens, "tokens_out": res.Usage.OutputTokens}})
+		"tokens_in": res.Usage.InputTokens, "tokens_in_cached": res.Usage.CachedInputTokens, "tokens_out": res.Usage.OutputTokens}})
 	return res
 }
 
@@ -120,11 +127,19 @@ func (a *Agent) loop(ctx context.Context, prompt string, rep Reporter) (res Resu
 	if a.Preamble != nil && a.PreviousID == "" {
 		user = a.Preamble(prompt)
 	}
+	instructions := SystemPrompt
+	var toolSpecs []llm.ToolSpec
+	if len(a.Carry) == 0 && isSmallTalk(prompt) {
+		instructions = SmallTalkSystemPrompt
+		user = prompt
+	} else {
+		toolSpecs = a.specsFor(prompt)
+	}
 	req := llm.Request{
-		Instructions: SystemPrompt,
+		Instructions: instructions,
 		UserText:     user,
 		ToolOutputs:  a.Carry,
-		Tools:        a.specs(),
+		Tools:        toolSpecs,
 		PreviousID:   a.PreviousID,
 		OnDelta:      rep.Delta,
 	}
@@ -159,6 +174,7 @@ func (a *Agent) loop(ctx context.Context, prompt string, rep Reporter) (res Resu
 		a.ContextTokens = resp.Usage.InputTokens
 		pending = nil
 		res.Usage.InputTokens += resp.Usage.InputTokens
+		res.Usage.CachedInputTokens += resp.Usage.CachedInputTokens
 		res.Usage.OutputTokens += resp.Usage.OutputTokens
 		rep.EndTurn()
 		if resp.Compacted {
@@ -173,7 +189,7 @@ func (a *Agent) loop(ctx context.Context, prompt string, rep Reporter) (res Resu
 			switch {
 			case resp.Incomplete != "":
 				rep.Notice("model stopped early (" + resp.Incomplete + "); asking it to continue")
-				req = llm.Request{Instructions: SystemPrompt, UserText: remind("Your last response was cut off. Continue, concisely: call a tool or finish."), Tools: a.specs(), PreviousID: a.PreviousID, OnDelta: rep.Delta}
+				req = llm.Request{Instructions: instructions, UserText: remind("Your last response was cut off. Continue, concisely: call a tool or finish."), Tools: toolSpecs, PreviousID: a.PreviousID, OnDelta: rep.Delta}
 				continue
 			case strings.TrimSpace(resp.Text) == "":
 				empty++
@@ -181,7 +197,7 @@ func (a *Agent) loop(ctx context.Context, prompt string, rep Reporter) (res Resu
 					res.Status, res.Err = StatusError, errors.New("the model returned empty responses repeatedly")
 					return res
 				}
-				req = llm.Request{Instructions: SystemPrompt, UserText: remind("Your last response was empty. Call a tool to continue, or call finish."), Tools: a.specs(), PreviousID: a.PreviousID, OnDelta: rep.Delta}
+				req = llm.Request{Instructions: instructions, UserText: remind("Your last response was empty. Call a tool to continue, or call finish."), Tools: toolSpecs, PreviousID: a.PreviousID, OnDelta: rep.Delta}
 				continue
 			}
 			// A plain-text answer ends the task. Its verification status is judged
@@ -228,7 +244,7 @@ func (a *Agent) loop(ctx context.Context, prompt string, rep Reporter) (res Resu
 		if ctx.Err() != nil {
 			return a.ended(ctx, res)
 		}
-		req = llm.Request{Instructions: SystemPrompt, UserText: remind(""), ToolOutputs: outputs, Tools: a.specs(), PreviousID: a.PreviousID, OnDelta: rep.Delta}
+		req = llm.Request{Instructions: instructions, UserText: remind(""), ToolOutputs: outputs, Tools: toolSpecs, PreviousID: a.PreviousID, OnDelta: rep.Delta}
 		if consecFail >= a.Limits.MaxConsecutiveFails {
 			res.Status = StatusStuck
 			res = a.wrapUp(ctx, res, &req, fmt.Sprintf("%d tool calls in a row failed", consecFail), rep)
@@ -244,6 +260,16 @@ func (a *Agent) loop(ctx context.Context, prompt string, rep Reporter) (res Resu
 		pending = nil
 	}
 	return res
+}
+
+func isSmallTalk(prompt string) bool {
+	switch strings.ToLower(strings.TrimSpace(prompt)) {
+	case "hi", "hi!", "hello", "hello!", "hey", "hey!", "howdy", "good morning", "good afternoon", "good evening",
+		"who are you", "who are you?", "who made you", "who made you?", "what can you do", "what can you do?", "thanks", "thank you":
+		return true
+	default:
+		return false
+	}
 }
 
 // unanswered returns placeholder outputs for calls without a result yet, so the
@@ -296,6 +322,7 @@ func (a *Agent) wrapUp(ctx context.Context, res Result, req *llm.Request, why st
 	rep.EndTurn()
 	a.PreviousID = resp.ID
 	res.Usage.InputTokens += resp.Usage.InputTokens
+	res.Usage.CachedInputTokens += resp.Usage.CachedInputTokens
 	res.Usage.OutputTokens += resp.Usage.OutputTokens
 	res.Text = resp.Text
 	res.Err = errors.New(why)
@@ -328,4 +355,54 @@ func (a *Agent) specs() []llm.ToolSpec {
 		out = append(out, llm.ToolSpec{Name: t.Name(), Description: t.Description(), Schema: t.InputSchema()})
 	}
 	return out
+}
+
+// specsFor sends only the tool families suggested by clearly scoped requests.
+// Unclassified requests retain the full registry so the router cannot hide a
+// capability the model may need.
+func (a *Agent) specsFor(prompt string) []llm.ToolSpec {
+	p := strings.ToLower(prompt)
+	files := hasAny(p, "file", "folder", "directory", "workspace", "project", "repository", "repo", "code", "source", "edit", "write", "read", "patch", "create", "delete", "rename", "move", "copy", "build", "test", "implement", "refactor", "bug", "fix", "documentation", "docs", ".go", ".py", ".js", ".ts", ".json", ".yaml", ".md")
+	network := hasAny(p, "network", "dns", "port", "url", "http", "internet", "connectivity", "firewall", "ip address", "socket")
+	process := hasAny(p, "process", "service", "daemon", "background job", "background process", "server", "pid")
+	system := hasAny(p, "system info", "system information", "cpu", "memory", "disk", "storage", "uptime", "kernel", "environment variable", "env var", "hostname", "health check")
+	runtime := hasAny(p, "runtime", "compiler", "toolchain", "package manager", "go version", "node version", "python version", "java version", "install package")
+	if !files && !network && !process && !system && !runtime {
+		return a.specs()
+	}
+
+	selected := map[string]bool{"finish": true, "update_plan": true}
+	for _, spec := range a.specs() {
+		switch {
+		case strings.HasPrefix(spec.Name, "shell_"):
+			selected[spec.Name] = true
+		case files && (strings.HasPrefix(spec.Name, "fs_") || spec.Name == "project_info"):
+			selected[spec.Name] = true
+		case network && strings.HasPrefix(spec.Name, "net_"):
+			selected[spec.Name] = true
+		case process && (strings.HasPrefix(spec.Name, "proc_") || spec.Name == "process_list"):
+			selected[spec.Name] = true
+		case system && (spec.Name == "sys_info" || spec.Name == "process_list" || spec.Name == "env_list"):
+			selected[spec.Name] = true
+		case runtime && spec.Name == "dev_runtimes":
+			selected[spec.Name] = true
+		}
+	}
+	all := a.specs()
+	out := make([]llm.ToolSpec, 0, len(selected))
+	for _, spec := range all {
+		if selected[spec.Name] {
+			out = append(out, spec)
+		}
+	}
+	return out
+}
+
+func hasAny(text string, terms ...string) bool {
+	for _, term := range terms {
+		if strings.Contains(text, term) {
+			return true
+		}
+	}
+	return false
 }
