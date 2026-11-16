@@ -35,6 +35,7 @@ type Request struct {
 	UserText     string
 	ToolOutputs  []ToolOutput
 	Tools        []ToolSpec
+	DeferTools   bool // ask supported providers to load function schemas on demand
 	PreviousID   string
 	// CompactAt asks the provider to compact the conversation once its context
 	// passes this many tokens (0: never). Providers that cannot do this ignore it.
