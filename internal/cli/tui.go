@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"math/rand"
 	"os"
 	"strings"
 	"time"
@@ -77,15 +78,35 @@ var (
 	headerSt = lipgloss.NewStyle().Bold(true).Foreground(accent)
 	dimSt    = lipgloss.NewStyle().Foreground(subtle)
 	userSt   = lipgloss.NewStyle().Bold(true).Foreground(accent)
-	// A moving diamond gives ScoutClaw's active state a distinct, compact
-	// signature in the footer without taking attention away from the reply.
+	// An outlined triangle rotates through its four orientations as a compact
+	// loading mark in the footer.
 	scoutLoader = spinner.Spinner{
-		Frames: []string{"◆··", "·◆·", "··◆", "·◆·"},
-		FPS:    110 * time.Millisecond,
+		Frames: []string{"△", "▷", "▽", "◁"},
+		FPS:    140 * time.Millisecond,
 	}
 )
 
 const idleInputPlaceholder = "Describe a problem, or type / for commands…"
+
+const loadingPhraseInterval = 4 * time.Second
+
+type loadingPhraseMsg struct{}
+
+// loadingPhrases are single words so they fit beside the loader in narrow
+// terminal footers. They rotate during longer tasks to make waiting feel
+// less static.
+var loadingPhrases = []string{
+	"thinking", "cooking", "melting", "plotting", "pondering", "scheming", "debugging", "untangling", "investigating", "spelunking",
+	"scanning", "searching", "tracing", "profiling", "compiling", "indexing", "parsing", "fetching", "querying", "reasoning",
+	"calculating", "measuring", "mapping", "sorting", "filtering", "comparing", "connecting", "inspecting", "examining", "probing",
+	"testing", "verifying", "validating", "checking", "rechecking", "confirming", "reviewing", "reading", "learning", "exploring",
+	"wandering", "stargazing", "browsing", "digging", "peeking", "snooping", "sniffing", "tracking", "hunting", "chasing",
+	"herding", "wrangling", "juggling", "untwisting", "unraveling", "deciphering", "translating", "interpreting", "unearthing", "organizing",
+	"tidying", "polishing", "patching", "repairing", "mending", "tuning", "tweaking", "adjusting", "assembling", "building",
+	"crafting", "sketching", "planning", "preparing", "warming", "brewing", "stirring", "baking", "simmering", "seasoning",
+	"marinating", "snacking", "nibbling", "munching", "gobbling", "nomming", "vibing", "dreaming", "daydreaming", "moonwalking",
+	"cartwheeling", "tiptoeing", "sneaking", "squinting", "eyeballing", "rubberducking", "googling", "gitblaming", "foraging", "troubleshooting",
+}
 
 type tuiMode int
 
@@ -116,12 +137,13 @@ type tuiModel struct {
 	w, h       int
 	mode       tuiMode
 
-	running   bool
-	started   time.Time
-	cancel    context.CancelFunc
-	activity  string
-	approval  *pendingApproval
-	quitArmed bool
+	running       bool
+	started       time.Time
+	cancel        context.CancelFunc
+	activity      string
+	loadingPhrase string
+	approval      *pendingApproval
+	quitArmed     bool
 
 	history     []string
 	histIdx     int // len(history) means "current draft"
@@ -287,6 +309,13 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.activity = string(msg)
 		return m, nil
 
+	case loadingPhraseMsg:
+		if m.running {
+			m.loadingPhrase = nextLoadingPhrase(m.loadingPhrase)
+			return m, tea.Tick(loadingPhraseInterval, func(time.Time) tea.Msg { return loadingPhraseMsg{} })
+		}
+		return m, nil
+
 	case deltaMsg:
 		m.streaming += string(msg)
 		m.layout()
@@ -325,7 +354,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case taskDoneMsg:
-		m.running, m.activity, m.cancel = false, "", nil
+		m.running, m.activity, m.loadingPhrase, m.cancel = false, "", "", nil
 		m.ta.Placeholder = idleInputPlaceholder
 		m.tokensIn += msg.res.Usage.InputTokens
 		m.tokensCache += msg.res.Usage.CachedInputTokens
@@ -522,6 +551,7 @@ func (m *tuiModel) submit() tea.Cmd {
 	m.appendRaw("\n" + userSt.Render("❯ "+strings.ReplaceAll(text, "\n", "\n  ")) + "\n")
 	ctx, cancel := context.WithCancel(m.ctx)
 	m.cancel, m.running, m.started, m.hadTask = cancel, true, time.Now(), true
+	m.loadingPhrase = nextLoadingPhrase("")
 	m.ta.Placeholder = "ScoutClaw is working on it…"
 	m.note = ""
 	m.layout()
@@ -530,7 +560,18 @@ func (m *tuiModel) submit() tea.Cmd {
 		defer cancel()
 		return taskDoneMsg{rt.RunTask(ctx, text)}
 	}
-	return tea.Batch(run, m.spin.Tick)
+	return tea.Batch(run, m.spin.Tick, tea.Tick(loadingPhraseInterval, func(time.Time) tea.Msg { return loadingPhraseMsg{} }))
+}
+
+func nextLoadingPhrase(current string) string {
+	if len(loadingPhrases) == 0 {
+		return "thinking"
+	}
+	i := rand.Intn(len(loadingPhrases))
+	if loadingPhrases[i] == current {
+		i = (i + 1) % len(loadingPhrases)
+	}
+	return loadingPhrases[i]
 }
 
 func (m *tuiModel) runSlash(line string) tea.Cmd {
@@ -798,6 +839,8 @@ func (m *tuiModel) statusBar(w int) string {
 		act := "thinking"
 		if m.activity != "" {
 			act = "$ " + m.activity
+		} else if m.loadingPhrase != "" {
+			act = m.loadingPhrase + "..."
 		}
 		left = dimSt.Render("⟦") + m.spin.View() + dimSt.Render("⟧ ") + ansi.Truncate(fmt.Sprintf("%s · %ds", act, int(time.Since(m.started).Seconds())), max(w/2, 10), "…") + dimSt.Render("  Ctrl+C cancels")
 	case m.quitArmed:
