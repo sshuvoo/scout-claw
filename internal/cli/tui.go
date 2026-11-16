@@ -77,7 +77,15 @@ var (
 	headerSt = lipgloss.NewStyle().Bold(true).Foreground(accent)
 	dimSt    = lipgloss.NewStyle().Foreground(subtle)
 	userSt   = lipgloss.NewStyle().Bold(true).Foreground(accent)
+	// A moving diamond gives ScoutClaw's active state a distinct, compact
+	// signature in the footer without taking attention away from the reply.
+	scoutLoader = spinner.Spinner{
+		Frames: []string{"◆··", "·◆·", "··◆", "·◆·"},
+		FPS:    110 * time.Millisecond,
+	}
 )
+
+const idleInputPlaceholder = "Describe a problem, or type / for commands…"
 
 type tuiMode int
 
@@ -177,7 +185,7 @@ func (a *App) runTUI(cmd *cobra.Command, cfg *config.Config, sess *session.Sessi
 func newTUIModel(a *App, ctx context.Context, cfg *config.Config, ui *UI) *tuiModel {
 	ta := textarea.New()
 	ta.Prompt = "❯ "
-	ta.Placeholder = "Describe a problem, or type / for commands…"
+	ta.Placeholder = idleInputPlaceholder
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
 	ta.SetHeight(1)
@@ -193,7 +201,7 @@ func newTUIModel(a *App, ctx context.Context, cfg *config.Config, ui *UI) *tuiMo
 	ki.EchoCharacter = '•'
 	ki.Placeholder = "paste your OpenAI API key, then Enter"
 
-	sp := spinner.New(spinner.WithSpinner(spinner.Dot))
+	sp := spinner.New(spinner.WithSpinner(scoutLoader))
 	sp.Style = lipgloss.NewStyle().Foreground(accent)
 
 	m := &tuiModel{app: a, cfg: cfg, ui: ui, ctx: ctx, ta: ta, ki: ki, spin: sp}
@@ -318,6 +326,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case taskDoneMsg:
 		m.running, m.activity, m.cancel = false, "", nil
+		m.ta.Placeholder = idleInputPlaceholder
 		m.tokensIn += msg.res.Usage.InputTokens
 		m.tokensCache += msg.res.Usage.CachedInputTokens
 		m.tokensOu += msg.res.Usage.OutputTokens
@@ -500,6 +509,7 @@ func (m *tuiModel) submit() tea.Cmd {
 	m.history = append(m.history, text)
 	m.histIdx, m.draft, m.sugIdx = len(m.history), "", 0
 	m.ta.Reset()
+	m.ta.Placeholder = idleInputPlaceholder
 	m.layout()
 
 	if strings.HasPrefix(text, "/") {
@@ -509,9 +519,10 @@ func (m *tuiModel) submit() tea.Cmd {
 		m.appendRaw(m.ui.c(cYellow, "! not ready yet — enter your API key with /key") + "\n")
 		return nil
 	}
-	m.appendRaw("\n" + userSt.Render("❯ "+strings.ReplaceAll(text, "\n", "\n  ")) + "\n\n")
+	m.appendRaw("\n" + userSt.Render("❯ "+strings.ReplaceAll(text, "\n", "\n  ")) + "\n")
 	ctx, cancel := context.WithCancel(m.ctx)
 	m.cancel, m.running, m.started, m.hadTask = cancel, true, time.Now(), true
+	m.ta.Placeholder = "ScoutClaw is working on it…"
 	m.note = ""
 	m.layout()
 	rt := m.rt
@@ -753,7 +764,7 @@ func (m *tuiModel) inputBox() string {
 	case m.mode == modeKey:
 		return m.boxStyle(warnCol).Render(m.ki.View())
 	case m.running:
-		return m.boxStyle(subtle).Render(m.ta.View())
+		return m.boxStyle(accent).Render(m.ta.View())
 	}
 	return m.boxStyle(accent).Render(m.ta.View())
 }
@@ -788,7 +799,7 @@ func (m *tuiModel) statusBar(w int) string {
 		if m.activity != "" {
 			act = "$ " + m.activity
 		}
-		left = m.spin.View() + " " + ansi.Truncate(fmt.Sprintf("%s · %ds", act, int(time.Since(m.started).Seconds())), max(w/2, 10), "…") + dimSt.Render("  Ctrl+C cancels")
+		left = dimSt.Render("⟦") + m.spin.View() + dimSt.Render("⟧ ") + ansi.Truncate(fmt.Sprintf("%s · %ds", act, int(time.Since(m.started).Seconds())), max(w/2, 10), "…") + dimSt.Render("  Ctrl+C cancels")
 	case m.quitArmed:
 		left = lipgloss.NewStyle().Foreground(warnCol).Render("press Ctrl+C again to quit")
 	case m.mode == modeKey:
