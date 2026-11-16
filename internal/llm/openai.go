@@ -24,6 +24,8 @@ type OpenAI struct {
 	// noCompaction is set once the endpoint rejects context_management (some
 	// OpenAI-compatible servers do), so later requests stop sending it.
 	noCompaction atomic.Bool
+	// noToolSearch is set once the endpoint rejects deferred function loading.
+	noToolSearch atomic.Bool
 }
 
 // NewOpenAI builds the provider. baseURL may be empty (SDK default / OPENAI_BASE_URL).
@@ -46,12 +48,42 @@ func (o *OpenAI) Model() string { return o.model }
 
 func (o *OpenAI) Generate(ctx context.Context, req Request) (*Response, error) {
 	compact := req.CompactAt > 0 && !o.noCompaction.Load()
-	out, err := o.generate(ctx, req, compact)
-	if compact && rejectsCompaction(err) {
-		o.noCompaction.Store(true)
-		out, err = o.generate(ctx, req, false)
+	deferTools := req.DeferTools && len(req.Tools) > 0 && supportsToolSearch(o.model) && !o.noToolSearch.Load()
+	for attempts := 0; attempts < 3; attempts++ {
+		out, err := o.generate(ctx, req, compact, deferTools)
+		if err == nil {
+			return out, nil
+		}
+		switch {
+		case compact && rejectsCompaction(err):
+			compact = false
+			o.noCompaction.Store(true)
+		case deferTools && rejectsToolSearch(err):
+			deferTools = false
+			o.noToolSearch.Store(true)
+		default:
+			return nil, err
+		}
 	}
-	return out, err
+	return nil, &Error{Kind: ErrBadRequest, Err: errors.New("provider rejected optional request features")}
+}
+
+func supportsToolSearch(model string) bool {
+	name := strings.ToLower(strings.TrimPrefix(model, "gpt-"))
+	parts := strings.SplitN(name, ".", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return false
+	}
+	minorPart := strings.SplitN(parts[1], "-", 2)[0]
+	minor, err := strconv.Atoi(minorPart)
+	if err != nil {
+		return false
+	}
+	return major > 5 || (major == 5 && minor >= 4)
 }
 
 // CompactionSupported reports whether the endpoint has accepted (or not yet
@@ -68,7 +100,16 @@ func rejectsCompaction(err error) bool {
 	return strings.Contains(msg, "context_management") || strings.Contains(msg, "compact")
 }
 
-func (o *OpenAI) generate(ctx context.Context, req Request, compact bool) (*Response, error) {
+func rejectsToolSearch(err error) bool {
+	var le *Error
+	if !errors.As(err, &le) || le.Kind != ErrBadRequest {
+		return false
+	}
+	msg := strings.ToLower(le.Err.Error())
+	return strings.Contains(msg, "tool_search") || strings.Contains(msg, "tool search") || strings.Contains(msg, "defer_loading")
+}
+
+func (o *OpenAI) generate(ctx context.Context, req Request, compact, deferTools bool) (*Response, error) {
 	params := responses.ResponseNewParams{
 		Model:        openai.ChatModel(o.model),
 		Instructions: openai.String(req.Instructions),
@@ -90,6 +131,11 @@ func (o *OpenAI) generate(ctx context.Context, req Request, compact bool) (*Resp
 	if req.PreviousID != "" {
 		params.PreviousResponseID = openai.String(req.PreviousID)
 	}
+	if deferTools {
+		params.Tools = append(params.Tools, responses.ToolUnionParam{OfToolSearch: &responses.ToolSearchToolParam{
+			Type: "tool_search", Execution: responses.ToolSearchToolExecutionServer,
+		}})
+	}
 	for _, t := range req.Tools {
 		var schema map[string]any
 		if err := json.Unmarshal(t.Schema, &schema); err != nil {
@@ -97,6 +143,9 @@ func (o *OpenAI) generate(ctx context.Context, req Request, compact bool) (*Resp
 		}
 		tp := responses.ToolParamOfFunction(t.Name, schema, false)
 		tp.OfFunction.Description = openai.String(t.Description)
+		if deferTools {
+			tp.OfFunction.DeferLoading = openai.Bool(true)
+		}
 		params.Tools = append(params.Tools, tp)
 	}
 
@@ -105,9 +154,12 @@ func (o *OpenAI) generate(ctx context.Context, req Request, compact bool) (*Resp
 		return nil, classify(ctx, err)
 	}
 	out := &Response{
-		ID:    resp.ID,
-		Text:  strings.TrimSpace(resp.OutputText()),
-		Usage: Usage{InputTokens: resp.Usage.InputTokens, OutputTokens: resp.Usage.OutputTokens},
+		ID:   resp.ID,
+		Text: strings.TrimSpace(resp.OutputText()),
+		Usage: Usage{
+			InputTokens: resp.Usage.InputTokens, CachedInputTokens: resp.Usage.InputTokensDetails.CachedTokens,
+			OutputTokens: resp.Usage.OutputTokens,
+		},
 	}
 	for _, item := range resp.Output {
 		switch item.Type {

@@ -87,6 +87,13 @@ type Result struct {
 
 func (a *Agent) Run(ctx context.Context, prompt string) Result {
 	start := time.Now()
+	// Keep provider history for tool-loop continuations, but do not replay an
+	// entire completed task chain for each new user request. Pending tool
+	// outputs are the exception: they must be delivered on their original chain.
+	if len(a.Carry) == 0 {
+		a.PreviousID = ""
+	}
+	a.ContextTokens = 0
 	rep := a.Reporter
 	if rep == nil {
 		rep = nopReporter{}
@@ -111,7 +118,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) Result {
 	}
 	a.Audit.Log(audit.Event{SessionID: a.SessionID, Kind: "task_end", Data: map[string]any{
 		"status": res.Status, "verification": res.Verify, "steps": res.Steps, "elapsed_ms": res.Elapsed.Milliseconds(),
-		"tokens_in": res.Usage.InputTokens, "tokens_out": res.Usage.OutputTokens}})
+		"tokens_in": res.Usage.InputTokens, "tokens_in_cached": res.Usage.CachedInputTokens, "tokens_out": res.Usage.OutputTokens}})
 	return res
 }
 
@@ -120,11 +127,13 @@ func (a *Agent) loop(ctx context.Context, prompt string, rep Reporter) (res Resu
 	if a.Preamble != nil && a.PreviousID == "" {
 		user = a.Preamble(prompt)
 	}
+	toolSpecs := a.specs()
 	req := llm.Request{
 		Instructions: SystemPrompt,
 		UserText:     user,
 		ToolOutputs:  a.Carry,
-		Tools:        a.specs(),
+		Tools:        toolSpecs,
+		DeferTools:   true,
 		PreviousID:   a.PreviousID,
 		OnDelta:      rep.Delta,
 	}
@@ -159,6 +168,7 @@ func (a *Agent) loop(ctx context.Context, prompt string, rep Reporter) (res Resu
 		a.ContextTokens = resp.Usage.InputTokens
 		pending = nil
 		res.Usage.InputTokens += resp.Usage.InputTokens
+		res.Usage.CachedInputTokens += resp.Usage.CachedInputTokens
 		res.Usage.OutputTokens += resp.Usage.OutputTokens
 		rep.EndTurn()
 		if resp.Compacted {
@@ -173,7 +183,7 @@ func (a *Agent) loop(ctx context.Context, prompt string, rep Reporter) (res Resu
 			switch {
 			case resp.Incomplete != "":
 				rep.Notice("model stopped early (" + resp.Incomplete + "); asking it to continue")
-				req = llm.Request{Instructions: SystemPrompt, UserText: remind("Your last response was cut off. Continue, concisely: call a tool or finish."), Tools: a.specs(), PreviousID: a.PreviousID, OnDelta: rep.Delta}
+				req = llm.Request{Instructions: SystemPrompt, UserText: remind("Your last response was cut off. Continue, concisely: call a tool or finish."), Tools: toolSpecs, DeferTools: true, PreviousID: a.PreviousID, OnDelta: rep.Delta}
 				continue
 			case strings.TrimSpace(resp.Text) == "":
 				empty++
@@ -181,7 +191,7 @@ func (a *Agent) loop(ctx context.Context, prompt string, rep Reporter) (res Resu
 					res.Status, res.Err = StatusError, errors.New("the model returned empty responses repeatedly")
 					return res
 				}
-				req = llm.Request{Instructions: SystemPrompt, UserText: remind("Your last response was empty. Call a tool to continue, or call finish."), Tools: a.specs(), PreviousID: a.PreviousID, OnDelta: rep.Delta}
+				req = llm.Request{Instructions: SystemPrompt, UserText: remind("Your last response was empty. Call a tool to continue, or call finish."), Tools: toolSpecs, DeferTools: true, PreviousID: a.PreviousID, OnDelta: rep.Delta}
 				continue
 			}
 			// A plain-text answer ends the task. Its verification status is judged
@@ -228,7 +238,7 @@ func (a *Agent) loop(ctx context.Context, prompt string, rep Reporter) (res Resu
 		if ctx.Err() != nil {
 			return a.ended(ctx, res)
 		}
-		req = llm.Request{Instructions: SystemPrompt, UserText: remind(""), ToolOutputs: outputs, Tools: a.specs(), PreviousID: a.PreviousID, OnDelta: rep.Delta}
+		req = llm.Request{Instructions: SystemPrompt, UserText: remind(""), ToolOutputs: outputs, Tools: toolSpecs, DeferTools: true, PreviousID: a.PreviousID, OnDelta: rep.Delta}
 		if consecFail >= a.Limits.MaxConsecutiveFails {
 			res.Status = StatusStuck
 			res = a.wrapUp(ctx, res, &req, fmt.Sprintf("%d tool calls in a row failed", consecFail), rep)
@@ -296,6 +306,7 @@ func (a *Agent) wrapUp(ctx context.Context, res Result, req *llm.Request, why st
 	rep.EndTurn()
 	a.PreviousID = resp.ID
 	res.Usage.InputTokens += resp.Usage.InputTokens
+	res.Usage.CachedInputTokens += resp.Usage.CachedInputTokens
 	res.Usage.OutputTokens += resp.Usage.OutputTokens
 	res.Text = resp.Text
 	res.Err = errors.New(why)

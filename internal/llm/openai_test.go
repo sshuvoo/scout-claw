@@ -15,10 +15,11 @@ import (
 // fakeResponses is a minimal Responses API server: it records each request
 // body and streams a completed response, optionally containing a compaction item.
 type fakeResponses struct {
-	mu        sync.Mutex
-	bodies    []map[string]any
-	compacted bool
-	reject    bool // answer 400 to requests that carry context_management
+	mu               sync.Mutex
+	bodies           []map[string]any
+	compacted        bool
+	reject           bool // answer 400 to requests that carry context_management
+	rejectToolSearch bool
 }
 
 func (f *fakeResponses) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -34,12 +35,23 @@ func (f *fakeResponses) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"error":{"message":"Unknown parameter: 'context_management'.","type":"invalid_request_error","param":"context_management","code":"unknown_parameter"}}`)
 		return
 	}
+	if f.rejectToolSearch {
+		for _, rawTool := range body["tools"].([]any) {
+			tool := rawTool.(map[string]any)
+			if tool["type"] == "tool_search" || tool["defer_loading"] == true {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				fmt.Fprint(w, `{"error":{"message":"Unknown parameter: tool_search or defer_loading.","type":"invalid_request_error","code":"unknown_parameter"}}`)
+				return
+			}
+		}
+	}
 	output := `{"type":"message","id":"m1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hello","annotations":[]}]}`
 	if f.compacted {
 		output = `{"type":"compaction","id":"c1","encrypted_content":"opaque"},` + output
 	}
 	resp := `{"id":"resp_1","object":"response","created_at":0,"status":"completed","model":"m","output":[` + output + `],` +
-		`"usage":{"input_tokens":1234,"output_tokens":5,"total_tokens":1239,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}},` +
+		`"usage":{"input_tokens":1234,"output_tokens":5,"total_tokens":1239,"input_tokens_details":{"cached_tokens":321},"output_tokens_details":{"reasoning_tokens":0}},` +
 		`"parallel_tool_calls":true,"tool_choice":"auto","tools":[]}`
 	w.Header().Set("Content-Type", "text/event-stream")
 	fmt.Fprintf(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\",\"sequence_number\":1}\n\n")
@@ -71,7 +83,7 @@ func TestOpenAISendsCompactionAndDetectsIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !resp.Compacted || resp.Text != "hello" || resp.Usage.InputTokens != 1234 || streamed.String() != "hello" {
+	if !resp.Compacted || resp.Text != "hello" || resp.Usage.InputTokens != 1234 || resp.Usage.CachedInputTokens != 321 || streamed.String() != "hello" {
 		t.Fatalf("response: %+v streamed=%q", resp, streamed.String())
 	}
 	cm, ok := f.body(0)["context_management"].([]any)
@@ -84,6 +96,48 @@ func TestOpenAISendsCompactionAndDetectsIt(t *testing.T) {
 	}
 	if f.body(0)["truncation"] != "auto" {
 		t.Fatalf("truncation should stay as a last resort: %v", f.body(0)["truncation"])
+	}
+}
+
+func TestOpenAIDeferredToolsAndCompatibilityFallback(t *testing.T) {
+	tool := ToolSpec{Name: "fs_read", Description: "Read a file", Schema: json.RawMessage(`{"type":"object","properties":{}}`)}
+	f := &fakeResponses{}
+	srv := httptest.NewServer(f)
+	t.Cleanup(srv.Close)
+	o, err := NewOpenAI("sk-test", srv.URL, "gpt-5.5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := o.Generate(context.Background(), Request{UserText: "hello", Tools: []ToolSpec{tool}, DeferTools: true}); err != nil {
+		t.Fatal(err)
+	}
+	tools := f.body(0)["tools"].([]any)
+	if tools[0].(map[string]any)["type"] != "tool_search" || tools[1].(map[string]any)["defer_loading"] != true {
+		t.Fatalf("tool schemas were not deferred: %#v", tools)
+	}
+
+	f2 := &fakeResponses{rejectToolSearch: true}
+	srv2 := httptest.NewServer(f2)
+	t.Cleanup(srv2.Close)
+	o2, err := NewOpenAI("sk-test", srv2.URL, "gpt-5.5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := o2.Generate(context.Background(), Request{UserText: "hello", Tools: []ToolSpec{tool}, DeferTools: true}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f2.bodies) != 2 || f2.bodies[1]["tools"].([]any)[0].(map[string]any)["defer_loading"] == true {
+		t.Fatalf("unsupported endpoint did not fall back to eager tools: %#v", f2.bodies)
+	}
+}
+
+func TestSupportsToolSearchByModelVersion(t *testing.T) {
+	for model, want := range map[string]bool{
+		"gpt-5.3": false, "gpt-5.4": true, "gpt-5.5": true, "gpt-6.1-preview": true, "custom-model": false,
+	} {
+		if got := supportsToolSearch(model); got != want {
+			t.Errorf("supportsToolSearch(%q) = %v, want %v", model, got, want)
+		}
 	}
 }
 

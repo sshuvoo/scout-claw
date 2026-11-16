@@ -180,8 +180,11 @@ func TestChatKeepsSessionAcrossTasksAndSupportsReset(t *testing.T) {
 		t.Fatal(h.errb.String())
 	}
 	r := h.prov.Requests
-	if len(r) != 3 || r[0].PreviousID != "" || r[1].PreviousID == "" || r[2].PreviousID != "" {
-		t.Fatalf("conversation continuity wrong: %+v", r)
+	if len(r) != 3 || r[0].PreviousID != "" || r[1].PreviousID != "" || r[2].PreviousID != "" {
+		t.Fatalf("new tasks should start fresh provider chains: %+v", r)
+	}
+	if !strings.Contains(r[1].UserText, "first question") {
+		t.Fatalf("follow-up recap missing prior task: %q", r[1].UserText)
 	}
 	if !strings.Contains(h.out.String(), "Context cleared") {
 		t.Fatal(h.out.String())
@@ -195,8 +198,8 @@ func TestResumeLastSession(t *testing.T) {
 	if code := h.run("run", "--resume", "last", "second"); code != 0 {
 		t.Fatal(h.errb.String())
 	}
-	if h.prov.Requests[1].PreviousID == "" || h.prov.Requests[1].UserText != "second" {
-		t.Fatalf("resume should continue the provider conversation: %+v", h.prov.Requests[1])
+	if h.prov.Requests[1].PreviousID != "" || !strings.Contains(h.prov.Requests[1].UserText, "second") || !strings.Contains(h.prov.Requests[1].UserText, "first") {
+		t.Fatalf("resume should use a fresh chain with a short task recap: %+v", h.prov.Requests[1])
 	}
 	if code := h.run("run", "--resume", "no-such-session", "x"); code == 0 {
 		t.Fatal("unknown session must fail")
@@ -220,7 +223,7 @@ func TestSlashCommandsInChat(t *testing.T) {
 	out := h.out.String()
 	for _, want := range []string{"/approval [mode]", "approval is now readonly", "unknown mode", "model is now gpt-test", "model: gpt-test",
 		"SCOUTCLAW_MODEL", "unknown command /nope", "/key needs an interactive terminal", "Bye from ScoutClaw",
-		"0 tokens in the conversation (compacts at 200000 tokens)", "SCOUTCLAW_COMPACT_AT", "no background processes", "/procs [stop <id>]"} {
+		"0 tokens in the conversation (compacts at 50000 tokens)", "SCOUTCLAW_COMPACT_AT", "no background processes", "/procs [stop <id>]"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)
 		}

@@ -62,6 +62,34 @@ func tc(id, name string, args any) llm.ToolCall {
 	return llm.ToolCall{ID: id, Name: name, Arguments: string(b)}
 }
 
+func TestAgentRequestsDeferredToolLoadingWithoutPromptClassification(t *testing.T) {
+	r := newRig(t, config.ApprovalAuto, llm.Reply("Hello!"))
+	res := r.a.Run(context.Background(), "hello")
+	if res.Status != StatusCompleted {
+		t.Fatalf("status = %s, err=%v", res.Status, res.Err)
+	}
+	got := r.llm.Requests[0]
+	if !got.DeferTools || len(got.Tools) < 10 || !strings.Contains(got.UserText, "hello") {
+		t.Fatalf("agent should defer tool schemas and preserve full tool access: %+v", got)
+	}
+}
+
+func TestNewTaskStartsFreshProviderChain(t *testing.T) {
+	r := newRig(t, config.ApprovalAuto, llm.Reply("first"), llm.Reply("second"))
+	if res := r.a.Run(context.Background(), "first task"); res.Status != StatusCompleted {
+		t.Fatal(res.Err)
+	}
+	if r.a.PreviousID == "" {
+		t.Fatal("first task did not receive provider response ID")
+	}
+	if res := r.a.Run(context.Background(), "second task"); res.Status != StatusCompleted {
+		t.Fatal(res.Err)
+	}
+	if got := r.llm.Requests[1].PreviousID; got != "" {
+		t.Fatalf("new task chained to old response %q", got)
+	}
+}
+
 func TestMultiStepFixAndVerify(t *testing.T) {
 	var r *rig
 	r = newRig(t, config.ApprovalAuto,
